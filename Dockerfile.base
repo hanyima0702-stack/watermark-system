@@ -1,0 +1,48 @@
+# 基础镜像 - 包含所有通用依赖
+FROM python:3.9-slim
+
+# 设置工作目录
+WORKDIR /app
+
+# 安装系统依赖
+RUN apt-get update && apt-get install -y \
+    # 基础工具
+    curl \
+    wget \
+    git \
+    # 图像处理依赖
+    libopencv-dev \
+    python3-opencv \
+    # 文档处理依赖
+    libreoffice \
+    # 音视频处理依赖
+    ffmpeg \
+    # 图像处理库
+    libpng-dev \
+    libjpeg-dev \
+    libtiff-dev \
+    # 编译工具
+    gcc \
+    g++ \
+    make \
+    # 清理缓存
+    && rm -rf /var/lib/apt/lists/*
+
+# 安装Python依赖
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# 复制共享代码
+COPY shared/ ./shared/
+
+# 设置Python路径
+ENV PYTHONPATH=/app
+
+# 创建非root用户
+RUN useradd --create-home --shell /bin/bash watermark
+RUN chown -R watermark:watermark /app
+USER watermark
+
+# 健康检查
+HEALTHCHECK --interval=30s --timeout=30s --start-period=5s --retries=3 \
+    CMD curl -f http://localhost:8000/health || exit 1

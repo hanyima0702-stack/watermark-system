@@ -1,0 +1,184 @@
+version: '3.8'
+
+services:
+  # PostgreSQL 数据库
+  postgres:
+    image: postgres:13
+    container_name: watermark-postgres
+    environment:
+      POSTGRES_DB: watermark_system
+      POSTGRES_USER: watermark_user
+      POSTGRES_PASSWORD: watermark_pass
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./storage/database/init.sql:/docker-entrypoint-initdb.d/init.sql
+    networks:
+      - watermark-network
+
+  # Redis 缓存
+  redis:
+    image: redis:6-alpine
+    container_name: watermark-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - watermark-network
+
+  # ClickHouse 时序数据库 (用于审计日志)
+  clickhouse:
+    image: yandex/clickhouse-server:latest
+    container_name: watermark-clickhouse
+    ports:
+      - "8123:8123"
+      - "9000:9000"
+    volumes:
+      - clickhouse_data:/var/lib/clickhouse
+      - ./storage/database/clickhouse-init.sql:/docker-entrypoint-initdb.d/init.sql
+    networks:
+      - watermark-network
+
+  # MinIO 对象存储
+  minio:
+    image: minio/minio:latest
+    container_name: watermark-minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin123
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio_data:/data
+    networks:
+      - watermark-network
+
+  # RabbitMQ 消息队列
+  rabbitmq:
+    image: rabbitmq:3-management
+    container_name: watermark-rabbitmq
+    environment:
+      RABBITMQ_DEFAULT_USER: watermark
+      RABBITMQ_DEFAULT_PASS: watermark123
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    networks:
+      - watermark-network
+
+  # API Gateway
+  api-gateway:
+    build:
+      context: .
+      dockerfile: gateway/api/Dockerfile
+    container_name: watermark-api-gateway
+    ports:
+      - "8000:8000"
+    environment:
+      - DATABASE_URL=postgresql://watermark_user:watermark_pass@postgres:5432/watermark_system
+      - REDIS_URL=redis://redis:6379/0
+      - RABBITMQ_URL=amqp://watermark:watermark123@rabbitmq:5672/
+      - MINIO_ENDPOINT=minio:9000
+      - MINIO_ACCESS_KEY=minioadmin
+      - MINIO_SECRET_KEY=minioadmin123
+    depends_on:
+      - postgres
+      - redis
+      - rabbitmq
+      - minio
+    networks:
+      - watermark-network
+
+  # Web Interface
+  web-interface:
+    build:
+      context: .
+      dockerfile: gateway/web/Dockerfile
+    container_name: watermark-web
+    ports:
+      - "3000:3000"
+    environment:
+      - API_GATEWAY_URL=http://api-gateway:8000
+    depends_on:
+      - api-gateway
+    networks:
+      - watermark-network
+
+  # Task Scheduler (Celery Worker)
+  task-scheduler:
+    build:
+      context: .
+      dockerfile: business/task_scheduler/Dockerfile
+    container_name: watermark-scheduler
+    environment:
+      - DATABASE_URL=postgresql://watermark_user:watermark_pass@postgres:5432/watermark_system
+      - REDIS_URL=redis://redis:6379/0
+      - RABBITMQ_URL=amqp://watermark:watermark123@rabbitmq:5672/
+    depends_on:
+      - postgres
+      - redis
+      - rabbitmq
+    networks:
+      - watermark-network
+
+  # Document Processing Engine
+  document-engine:
+    build:
+      context: .
+      dockerfile: engines/document/Dockerfile
+    container_name: watermark-document-engine
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+      - RABBITMQ_URL=amqp://watermark:watermark123@rabbitmq:5672/
+    depends_on:
+      - redis
+      - rabbitmq
+    networks:
+      - watermark-network
+
+  # Image Processing Engine
+  image-engine:
+    build:
+      context: .
+      dockerfile: engines/image/Dockerfile
+    container_name: watermark-image-engine
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+      - RABBITMQ_URL=amqp://watermark:watermark123@rabbitmq:5672/
+    depends_on:
+      - redis
+      - rabbitmq
+    networks:
+      - watermark-network
+
+  # Media Processing Engine
+  media-engine:
+    build:
+      context: .
+      dockerfile: engines/media/Dockerfile
+    container_name: watermark-media-engine
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+      - RABBITMQ_URL=amqp://watermark:watermark123@rabbitmq:5672/
+    depends_on:
+      - redis
+      - rabbitmq
+    networks:
+      - watermark-network
+
+volumes:
+  postgres_data:
+  redis_data:
+  clickhouse_data:
+  minio_data:
+  rabbitmq_data:
+
+networks:
+  watermark-network:
+    driver: bridge
