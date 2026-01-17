@@ -39,13 +39,16 @@ class TestOfficeProcessor:
                         'content': '{user_id} - {timestamp}',
                         'font': {
                             'family': 'Arial',
-                            'size': 12,
-                            'color': '#FF0000',
-                            'opacity': 0.5
+                            'width': 100,
+                            'height': 25,
+                            'color': 'yellow',
+                            'opacity': 1
                         },
                         'position': {
                             'x': 'center',
                             'y': 'center',
+                            'margin-left':100,
+                            'margin-top':100,
                             'rotation': 45
                         }
                     }

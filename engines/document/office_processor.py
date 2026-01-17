@@ -26,6 +26,12 @@ from pptx import Presentation
 from pptx.util import Inches as PptxInches, Pt as PptxPt
 from pptx.enum.text import PP_ALIGN
 from pptx.dml.color import RGBColor
+from docx import Document
+from docx.oxml import parse_xml
+from xml.sax.saxutils import escape
+from pathlib import Path
+from datetime import datetime
+from typing import Dict, Any
 
 from .base_processor import DocumentProcessor, WatermarkConfig, DocumentProcessingError
 from .base_processor import WatermarkEmbeddingError, DigitalSignatureError
@@ -132,39 +138,66 @@ class OfficeProcessor(DocumentProcessor):
                 
         doc.save(str(output_path))
         return output_path
-    
-    def _add_word_text_watermark(self, doc: Document, layer_config: Dict[str, Any], 
-                               user_id: str, timestamp: datetime):
-        """Add text watermark to Word document."""
-        # Replace template variables
+
+    def _add_word_text_watermark(self,doc: Document, layer_config: Dict[str, Any],
+                                 user_id: str, timestamp: datetime):
         content = layer_config.get('content', '')
         content = content.replace('{user_id}', user_id)
         content = content.replace('{timestamp}', timestamp.strftime('%Y-%m-%d %H:%M:%S'))
-        
-        # Add watermark to header
+        content = escape(content)  # 重要：XML 转义
+
+        font = layer_config.get('font', {}) or {}
+        position = layer_config.get('position', {}) or {}
+
+        rotation = position.get('rotation', 0)
+        margin_left = position.get('margin-left', 0)
+        margin_top = position.get('margin-top', 0)
+        x_pos = position.get('x', 'center')
+        y_pos = position.get('y', 'center')
+
+        family = font.get('family', 'Arial')
+        width = font.get('width', 400)  # 水印通常较大
+        height = font.get('height',100)
+        color = font.get('color', '#808080')
+        opacity = font.get('opacity', 0.5)
+        # 把 opacity 转为字符串，VML 期望 0..1
+        opacity_str = str(opacity)
+
+        # 生成更规范的 VML，使用 <v:fill/> 控制颜色与透明度
+        watermark_xml = f'''
+        <w:p xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+             xmlns:v="urn:schemas-microsoft-com:vml"
+             xmlns:o="urn:schemas-microsoft-com:office:office">
+          <w:r>
+            <w:pict>
+              <v:shape id="PowerPlusWaterMarkObject" o:spid="_x0000_s2050" type="#_x0000_t136"
+                       style="position:absolute;margin-left:{margin_left}pt;margin-top:{margin_top}pt;width:{width}pt;height:{height}pt;rotation:{rotation};z-index:-251658240;
+                              mso-position-horizontal:{x_pos};mso-position-horizontal-relative:margin;
+                              mso-position-vertical:{y_pos};mso-position-vertical-relative:margin"
+                       o:allowincell="f" stroked="f">
+                <v:fill color="{color}" opacity="{opacity_str}"/>
+                <v:textpath on="t" style="font-family:'{family}'" string="{content}"/>
+              </v:shape>
+            </w:pict>
+          </w:r>
+        </w:p>
+        '''
+
+        # 将 watermark XML 注入每个节的 header（注意：解除与前一节的链接，以保证显示）
         for section in doc.sections:
+            # 尝试断开与前一节的 header 链接（若需要）
+            try:
+                section.header.is_linked_to_previous = False
+            except Exception:
+                # 某些 python-docx 版本可能没有该属性，忽略
+                pass
+
             header = section.header
-            if header.paragraphs:
-                paragraph = header.paragraphs[0]
-            else:
-                paragraph = header.add_paragraph()
-                
-            # Clear existing content
-            paragraph.clear()
-            
-            # Add watermark text
-            run = paragraph.add_run(content)
-            font = run.font
-            
-            # Apply font configuration
-            font_config = layer_config.get('font', {})
-            font.name = font_config.get('family', 'Arial')
-            font.size = Pt(font_config.get('size', 12))
-            
-            # Set paragraph alignment
-            position_config = layer_config.get('position', {})
-            if position_config.get('x') == 'center':
-                paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            # 保证 header 至少有一个段落
+            if not header.paragraphs:
+                header.add_paragraph()
+            # append XML 到 header 元素（使用 parse_xml）
+            header._element.append(parse_xml(watermark_xml))
     
     def _add_excel_watermark(self, input_path: Path, output_path: Path,
                            watermark_config: WatermarkConfig, user_id: str, timestamp: datetime) -> Path:
