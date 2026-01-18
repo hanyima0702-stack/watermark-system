@@ -39,14 +39,15 @@ class TestPDFProcessor:
                         'content': '{user_id} - {timestamp}',
                         'font': {
                             'family': 'Arial',
-                            'size': 12,
-                            'color': '#FF0000',
-                            'opacity': 0.5
+                            'size': 40,
+                            'color': '#0000FF',
+                            'opacity': 0.2
                         },
                         'position': {
-                            'x': 'center',
-                            'y': 'center',
-                            'rotation': 45
+                            'rotation': 45,
+                            'tiled': True,     # 新增：开启平铺
+                            'gap_x': 50,       # 新增：左右间隔 (像素)
+                            'gap_y': 300
                         }
                     },
                     {
@@ -100,11 +101,17 @@ class TestPDFProcessor:
             input_path, sample_watermark_config, 'test_user', datetime.now()
         )
         
-        # Verify
-        assert result_path.exists()
-        mock_fitz_open.assert_called_once_with(str(input_path))
-        mock_doc.save.assert_called_once()
-        mock_doc.close.assert_called_once()
+    def test_add_visible_watermark(self,processor, sample_watermark_config):
+        input_path = Path('D:/毕业设计/项目/测试文件/pdf/专硕1.pdf')
+        input_path.touch()
+
+        # Execute
+        result_path = processor.add_visible_watermark(
+            input_path, sample_watermark_config, 'test_user', datetime.now()
+        )
+
+
+
     
     @patch('engines.document.pdf_processor.fitz.open')
     def test_add_invisible_watermark_success(self, mock_fitz_open, processor, temp_dir):

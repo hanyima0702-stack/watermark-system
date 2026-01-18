@@ -156,55 +156,102 @@ class PDFProcessor(DocumentProcessor):
             logger.error(f"Failed to extract invisible watermark from PDF: {e}")
             
         return None
-    
+
     def _add_pdf_text_watermark(self, page: fitz.Page, layer_config: Dict[str, Any],
-                              user_id: str, timestamp: datetime):
-        """Add text watermark to PDF page."""
-        # Replace template variables
+                                user_id: str, timestamp: datetime):
+        """Add text watermark to PDF page (supports tiling)."""
+        import math  # 确保导入 math
+
+        # 1. 准备内容
         content = layer_config.get('content', '')
         content = content.replace('{user_id}', user_id)
         content = content.replace('{timestamp}', timestamp.strftime('%Y-%m-%d %H:%M:%S'))
-        
-        # Get page dimensions
+
+        # 2. 获取页面尺寸
         page_rect = page.rect
         page_width = page_rect.width
         page_height = page_rect.height
-        
-        # Get font configuration
+
+        # 3. 获取字体配置
         font_config = layer_config.get('font', {})
         font_size = font_config.get('size', 12)
         font_color = self._parse_color(font_config.get('color', '#FF0000'))
         opacity = font_config.get('opacity', 0.5)
-        
-        # Get position configuration
+
+        # 4. 获取位置配置
         position_config = layer_config.get('position', {})
         rotation = position_config.get('rotation', 45)
-        
-        # Calculate position
-        x_pos, y_pos = self._calculate_position(
-            position_config, page_width, page_height, content, font_size
-        )
-        
-        # Create text watermark
+        is_tiled = position_config.get('tiled', False)  # 默认为 False (单个)
+        gap_x = position_config.get('gap_x', 50)  # 默认左右间隔 50
+        gap_y = position_config.get('gap_y', 50)  # 默认上下间隔 50
+
+        # 5. 计算文本宽度 (用于计算间隔步长)
+        # 使用 PyMuPDF 内置的标准字体来估算长度，确保排版整齐
+        temp_font = fitz.Font("helv")
+        text_length = temp_font.text_length(content, fontsize=font_size)
+        text_height = font_size * 1.2  # 估算行高
+
+        # 创建 TextWriter
         text_writer = fitz.TextWriter(page_rect)
-        
-        # Add text with specified properties
-        point = fitz.Point(x_pos, y_pos)
-        text_writer.append(
-            point, 
-            content,
-            fontsize=font_size,
-            color=font_color
-        )
-        
-        # Apply rotation if specified
-        if rotation != 0:
-            # Create transformation matrix for rotation
+
+        if is_tiled:
+            # --- 平铺模式逻辑 ---
+
+            # 计算步长 = 文字本身长度 + 用户定义的间隔
+            step_x = text_length + gap_x
+            step_y = text_height + gap_y
+
+            # 计算覆盖范围
+            # 如果有旋转，我们需要在一个比页面大得多的区域绘制，
+            # 否则旋转后角落会是空的。我们用页面对角线长度作为基准。
+            diagonal = math.sqrt(page_width ** 2 + page_height ** 2)
+
+            # 定义绘制的起始和结束坐标 (以中心为原点向外扩展)
+            # 范围设为 -diagonal 到 +diagonal 确保旋转后能覆盖全图
+            start_y = -diagonal
+            end_y = diagonal
+            start_x = -diagonal
+            end_x = diagonal
+
+            # 循环生成网格
+            curr_y = start_y
+            while curr_y < end_y:
+                curr_x = start_x
+                while curr_x < end_x:
+                    point = fitz.Point(curr_x, curr_y)
+                    text_writer.append(point, content, fontsize=font_size)
+                    curr_x += step_x
+                curr_y += step_y
+
+            # 设置旋转中心为页面中心
             center = fitz.Point(page_width / 2, page_height / 2)
             matrix = fitz.Matrix(rotation)
-            text_writer.write_text(page, morph=(center, matrix), opacity=opacity)
+
+            # 写入页面 (带旋转和颜色)
+            text_writer.write_text(
+                page,
+                morph=(center, matrix),
+                opacity=opacity,
+                color=font_color
+            )
+
         else:
-            text_writer.write_text(page, opacity=opacity)
+            # --- 单个水印逻辑 (保持原有逻辑，已修复 color bug) ---
+
+            # 计算单个位置
+            x_pos, y_pos = self._calculate_position(
+                position_config, page_width, page_height, content, font_size
+            )
+
+            point = fitz.Point(x_pos, y_pos)
+            text_writer.append(point, content, fontsize=font_size)
+
+            if rotation != 0:
+                center = fitz.Point(page_width / 2, page_height / 2)
+                matrix = fitz.Matrix(rotation)
+                text_writer.write_text(page, morph=(center, matrix), opacity=opacity, color=font_color)
+            else:
+                text_writer.write_text(page, opacity=opacity, color=font_color)
     
     def _add_pdf_qrcode_watermark(self, page: fitz.Page, layer_config: Dict[str, Any],
                                 user_id: str, timestamp: datetime):
