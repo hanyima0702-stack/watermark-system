@@ -331,13 +331,13 @@ class LibreOfficeConverter:
             '--outdir', str(output_path.parent),
             str(input_path)
         ]
-        
-        # Add additional options
-        if options.get('no_logo'):
-            cmd.append('--nologo')
-        
-        if options.get('invisible'):
-            cmd.append('--invisible')
+        if options != None:
+            # Add additional options
+            if options.get('no_logo'):
+                cmd.append('--nologo')
+
+            if options.get('invisible'):
+                cmd.append('--invisible')
             
         return cmd
     
@@ -469,7 +469,8 @@ def convert_to_pdf(input_path: Path, output_path: Path = None, options: Dict[str
         output_path = input_path.with_suffix('.pdf')
     
     service = DocumentConversionService()
-    return service.convert_single_document(input_path, output_path, ConversionFormat.PDF, options)
+    res = service.convert_single_document(input_path, output_path, ConversionFormat.PDF, options)
+    return res
 
 
 def batch_convert_to_pdf(input_files: List[Path], output_dir: Path, options: Dict[str, Any] = None) -> List[ConversionJob]:

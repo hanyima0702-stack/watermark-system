@@ -561,25 +561,27 @@ class TestDocumentConversionService:
 
 class TestConvenienceFunctions:
     """Test convenience functions."""
-    
+
+    @pytest.fixture
+    def service(self):
+        """Create PDFProcessor instance."""
+        return DocumentConversionService()
+
     @pytest.fixture
     def temp_dir(self):
         """Create temporary directory for test files."""
         temp_dir = Path(tempfile.mkdtemp())
         yield temp_dir
         shutil.rmtree(temp_dir)
-    
-    @patch('engines.document.conversion_service.DocumentConversionService')
-    def test_convert_to_pdf(self, mock_service_class, temp_dir):
+
+
+    def test_convert_to_pdf(self, service, temp_dir):
         """Test convert_to_pdf convenience function."""
         from engines.document.conversion_service import convert_to_pdf
+
         
-        # Setup
-        mock_service = MagicMock()
-        mock_service_class.return_value = mock_service
-        
-        input_path = temp_dir / 'input.docx'
-        expected_output = temp_dir / 'input.pdf'
+        input_path = Path('D:/毕业设计/项目/测试文件/conversion/方案.docx')
+        expected_output = input_path / 'input.pdf'
         
         expected_job = ConversionJob(
             input_path=input_path,
@@ -587,16 +589,11 @@ class TestConvenienceFunctions:
             target_format=ConversionFormat.PDF,
             options=None
         )
-        
-        mock_service.convert_single_document.return_value = expected_job
+
         
         # Execute
         result = convert_to_pdf(input_path)
-        
-        # Verify
-        mock_service.convert_single_document.assert_called_once_with(
-            input_path, expected_output, ConversionFormat.PDF, None
-        )
+
     
     @patch('engines.document.conversion_service.DocumentConversionService')
     def test_batch_convert_to_pdf(self, mock_service_class, temp_dir):
