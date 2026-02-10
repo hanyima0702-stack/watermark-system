@@ -5,25 +5,26 @@ Implements visible watermarks, invisible watermarks, and PKCS#7 digital signatur
 import os
 import tempfile
 from pathlib import Path
-from typing import Optional, Dict, Any, List, Tuple
+from typing import Optional, Dict, Any, List, Tuple, Union
 from datetime import datetime
 import logging
 import base64
 import hashlib
-
+from PIL import Image
 # PDF processing libraries
 import fitz  # PyMuPDF
-from reportlab.pdfgen import canvas
-from reportlab.lib.pagesizes import letter, A4
-from reportlab.lib.colors import Color
-from reportlab.lib.units import inch
-from reportlab.pdfbase import pdfmetrics
-from reportlab.pdfbase.ttfonts import TTFont
-from reportlab.lib.utils import ImageReader
+import cv2
+
 import io
+
+from markdown_it.rules_inline import image
 
 from .base_processor import DocumentProcessor, WatermarkConfig, DocumentProcessingError
 from .base_processor import WatermarkEmbeddingError, DigitalSignatureError
+from ..extraction.report_generator import WatermarkReportGenerator, ExtractionResult
+import numpy as np
+from ..image.image_processor import ImageProcessor
+
 
 logger = logging.getLogger(__name__)
 
@@ -31,10 +32,20 @@ logger = logging.getLogger(__name__)
 class PDFProcessor(DocumentProcessor):
     """Processor for PDF documents with watermark and signature capabilities."""
     
-    def __init__(self):
+    def __init__(self,):
+        """
+        初始化PDF处理器
+
+        """
         super().__init__()
         self.supported_formats = ['.pdf']
         
+        # 初始化水印处理器
+        self.imageProcessor = ImageProcessor()
+
+
+
+
     def add_visible_watermark(self, file_path: Path, watermark_config: WatermarkConfig,
                             user_id: str, timestamp: datetime) -> Path:
         """Add visible watermark to PDF document using overlay technique."""
@@ -75,34 +86,97 @@ class PDFProcessor(DocumentProcessor):
         except Exception as e:
             logger.error(f"Failed to add visible watermark to PDF: {e}")
             raise WatermarkEmbeddingError(f"Failed to add visible watermark: {e}")
-    
-    def add_invisible_watermark(self, file_path: Path, watermark_data: str) -> Path:
-        """Add invisible watermark to PDF using background rasterization technique."""
+
+    def add_invisible_watermark(self, file_path: Path, watermark_data: str , mode = "img") -> Path:
+        """Add invisible watermark to PDF using selected method."""
+        assert mode in ('img', 'str', 'bit'), "mode in ('img','str','bit')"
+
         if not self.is_supported_format(file_path):
             raise DocumentProcessingError(f"Unsupported format: {file_path.suffix}")
-            
+
         output_path = self.generate_output_path(file_path, "_invisible")
-        
+
         try:
-            # Open PDF document
+            # 打开PDF文档
             pdf_doc = fitz.open(str(file_path))
-            
-            # Add invisible watermark to each page
+
+            # 创建新的PDF文档
+            output_doc = fitz.open()
+
+            # 处理每一页
             for page_num in range(len(pdf_doc)):
                 page = pdf_doc[page_num]
-                self._add_pdf_background_watermark(page, watermark_data)
-                
-            # Save watermarked PDF
-            pdf_doc.save(str(output_path))
+
+                # 将PDF页面渲染为高分辨率图像（300 DPI）
+                mat = fitz.Matrix(300/72, 300/72)  # 300 DPI
+                pix = page.get_pixmap(matrix=mat, alpha=False)
+
+                # 转换为numpy数组
+                img_data = np.frombuffer(pix.samples, dtype=np.uint8)
+                img_array = img_data.reshape(pix.height, pix.width, pix.n)
+
+                # RGB -> BGR
+                img_array = cv2.cvtColor(img_array, cv2.COLOR_RGB2BGR)
+
+                #读取原图片
+                self.imageProcessor.bwm_core.read_img_arr(img=img_array)
+
+                #读取水印
+
+                self.imageProcessor.read_wm(watermark_data,mode=mode)
+
+                #嵌入水印
+
+                embed_img =self.imageProcessor.embed()
+
+
+                # 将含水印的图像转换回PDF页面
+                new_page = output_doc.new_page(
+                    width=page.rect.width,
+                    height=page.rect.height
+                )
+
+                # 将图像插入新页面
+                img_buffer = io.BytesIO()
+                from PIL import Image
+
+                # 四舍五入
+                rounded_img = np.round(embed_img)
+
+                #限制范围
+                clipped_img = np.clip(rounded_img, 0, 255)
+
+                #类型转换
+                uint8_img = clipped_img.astype(np.uint8)
+
+                #颜色空间转换 BGR -> RGB
+                # if uint8_img.shape[2] == 3:  # 确保是彩色图片
+                uint8_img = cv2.cvtColor(uint8_img, cv2.COLOR_BGR2RGB)
+
+                pil_img = Image.fromarray(uint8_img)
+                pil_img.save(img_buffer, format='PNG')
+                img_buffer.seek(0)
+
+                # 插入图像到页面
+                img_rect = new_page.rect
+                new_page.insert_image(img_rect, stream=img_buffer.getvalue())
+
+                logger.info(f"{page_num}页处理完毕")
+
+            # 保存输出PDF
+            output_doc.save(str(output_path))
+            output_doc.close()
             pdf_doc.close()
-            
-            logger.info(f"Added invisible watermark to PDF: {output_path}")
+
+            logger.info(f"PDF: {output_path}水印添加完毕")
+
             return output_path
-            
+
         except Exception as e:
             logger.error(f"Failed to add invisible watermark to PDF: {e}")
             raise WatermarkEmbeddingError(f"Failed to add invisible watermark: {e}")
-    
+
+
     def add_digital_signature(self, file_path: Path, certificate_path: Path, password: str) -> Path:
         """Add PKCS#7 digital signature to PDF document."""
         output_path = self.generate_output_path(file_path, "_signed")
@@ -137,25 +211,80 @@ class PDFProcessor(DocumentProcessor):
         except Exception as e:
             logger.error(f"Failed to add digital signature to PDF: {e}")
             raise DigitalSignatureError(f"Failed to add digital signature: {e}")
-    
-    def extract_invisible_watermark(self, file_path: Path) -> Optional[str]:
-        """Extract invisible watermark from PDF document."""
+
+    def extract_invisible_watermark(self, file_path: Path,output_path: Path, page=[1,1],mode = 'img',wm_shape=None) -> Optional[str]:
+        assert wm_shape is not None, 'wm_shape needed'
         try:
             pdf_doc = fitz.open(str(file_path))
-            
-            # Try to extract watermark from first page
-            if len(pdf_doc) > 0:
-                page = pdf_doc[0]
-                watermark_data = self._extract_pdf_background_watermark(page)
-                pdf_doc.close()
-                return watermark_data
-                
+
+
+            # 从指定范围提取水印
+            for i in range(page[0],page[1]):
+                page = pdf_doc[i]
+
+                # 将页面渲染为图像（300 DPI）
+                mat = fitz.Matrix(300/72, 300/72)
+                pix = page.get_pixmap(matrix=mat, alpha=False)
+
+                # 转换为numpy数组
+                img_data = np.frombuffer(pix.samples, dtype=np.uint8)
+                img_array = img_data.reshape(pix.height, pix.width, pix.n)
+
+                #颜色空间转换 RGB -> BGR
+                # if uint8_img.shape[2] == 3:  # 确保是彩色图片
+                uint8_img = cv2.cvtColor(img_array, cv2.COLOR_RGB2BGR)
+
+                self.imageProcessor.extract(embed_img=uint8_img,wm_shape=wm_shape,out_wm_name=output_path/f'page{i}.png')
+
+
             pdf_doc.close()
-            
+
         except Exception as e:
-            logger.error(f"Failed to extract invisible watermark from PDF: {e}")
-            
-        return None
+            logger.error(f"Failed to extract FFT invisible watermark from PDF: {e}")
+
+
+
+
+
+    def crop_pdf(self,input_path: Path, pages_to_keep: list, output_name: str = "cropped_pymupdf.pdf"):
+        """
+        使用 PyMuPDF 提取 PDF 的特定页码。
+
+        :param input_path: PDF 文件的 pathlib.Path 对象
+        :param pages_to_keep: 要保留的页码列表（从 1 开始计数）
+        :param output_name: 输出文件名称
+        """
+        try:
+            # 打开文档
+            doc = fitz.open(input_path)
+
+            # 将人类阅读的页码 (1-based) 转换为索引 (0-based)
+            # 并过滤掉超出范围的页码
+            total_pages = len(doc)
+            indices = [p - 1 for p in pages_to_keep if 1 <= p <= total_pages]
+
+            if not indices:
+                print("错误：没有有效的页码可供提取。")
+                return None
+
+            # 使用 select() 直接修改内存中的文档对象，只保留选定页面
+            doc.select(indices)
+
+            # 确定输出路径
+            output_path = input_path.parent / output_name
+
+            # 保存文档 (garbage=4 表示进行高压缩和清理)
+            doc.save(output_path, garbage=4, deflate=True)
+            doc.close()
+
+            print(f"提取完成！文件已保存至: {output_path}")
+            return output_path
+
+        except Exception as e:
+            print(f"PyMuPDF 处理出错: {e}")
+            return None
+
+
 
     def _add_pdf_text_watermark(self, page: fitz.Page, layer_config: Dict[str, Any],
                                 user_id: str, timestamp: datetime):
@@ -390,6 +519,73 @@ class PDFProcessor(DocumentProcessor):
             color=(0, 0, 0)
         )
         text_writer.write_text(page)
+    
+    def _string_to_bits(self, text: str) -> np.ndarray:
+        """将字符串转换为比特序列"""
+        # 将字符串编码为字节
+        byte_data = text.encode('utf-8')
+        
+        # 转换为比特数组
+        bits = []
+        for byte in byte_data:
+            for i in range(8):
+                bits.append((byte >> (7 - i)) & 1)
+        
+        return np.array(bits, dtype=np.uint8)
+    
+    def _bits_to_string(self, bits: np.ndarray) -> str:
+        """将比特序列转换回字符串"""
+        try:
+            # 确保比特数是8的倍数
+            num_bits = len(bits)
+            num_bytes = num_bits // 8
+            
+            if num_bytes == 0:
+                return ""
+            
+            # 转换比特为字节
+            byte_data = bytearray()
+            for i in range(num_bytes):
+                byte_val = 0
+                for j in range(8):
+                    bit_idx = i * 8 + j
+                    if bit_idx < num_bits:
+                        byte_val = (byte_val << 1) | int(bits[bit_idx])
+                byte_data.append(byte_val)
+            
+            # 尝试解码为字符串
+            # 首先尝试UTF-8
+            try:
+                text = byte_data.decode('utf-8', errors='strict')
+                # 移除不可打印字符
+                text = ''.join(char for char in text if char.isprintable() or char in '\n\r\t ')
+                return text
+            except UnicodeDecodeError:
+                # 如果UTF-8失败，尝试ASCII
+                try:
+                    text = byte_data.decode('ascii', errors='ignore')
+                    text = ''.join(char for char in text if char.isprintable() or char in '\n\r\t ')
+                    return text
+                except:
+                    # 如果都失败，返回十六进制表示
+                    return byte_data.hex()
+            
+        except Exception as e:
+            logger.error(f"Failed to convert bits to string: {e}")
+            # 返回比特的十六进制表示作为后备
+            try:
+                num_bytes = len(bits) // 8
+                byte_data = bytearray()
+                for i in range(num_bytes):
+                    byte_val = 0
+                    for j in range(8):
+                        bit_idx = i * 8 + j
+                        if bit_idx < len(bits):
+                            byte_val = (byte_val << 1) | int(bits[bit_idx])
+                    byte_data.append(byte_val)
+                return byte_data.hex()
+            except:
+                return ""
     
     def _parse_color(self, color_str: str) -> Tuple[float, float, float]:
         """Parse color string to RGB tuple."""

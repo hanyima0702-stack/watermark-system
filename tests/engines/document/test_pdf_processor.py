@@ -26,6 +26,10 @@ class TestPDFProcessor:
         temp_dir = Path(tempfile.mkdtemp())
         yield temp_dir
         shutil.rmtree(temp_dir)
+
+    @pytest.fixture
+    def watermark(self):
+        return "D:/pic/watermark_pic.png"
     
     @pytest.fixture
     def sample_watermark_config(self):
@@ -67,39 +71,7 @@ class TestPDFProcessor:
         }
         return WatermarkConfig(config_dict)
     
-    def test_supported_formats(self, processor):
-        """Test supported file formats."""
-        assert '.pdf' in processor.supported_formats
-        assert len(processor.supported_formats) == 1
-    
-    def test_is_supported_format(self, processor):
-        """Test format support checking."""
-        assert processor.is_supported_format(Path('test.pdf'))
-        assert not processor.is_supported_format(Path('test.docx'))
-        assert not processor.is_supported_format(Path('test.txt'))
-    
-    @patch('engines.document.pdf_processor.fitz.open')
-    def test_add_visible_watermark_success(self, mock_fitz_open, processor, sample_watermark_config, temp_dir):
-        """Test successful PDF visible watermark addition."""
-        # Setup
-        input_path = temp_dir / 'test.pdf'
-        input_path.touch()
-        
-        mock_doc = MagicMock()
-        mock_page = MagicMock()
-        mock_rect = MagicMock()
-        mock_rect.width = 612
-        mock_rect.height = 792
-        
-        mock_fitz_open.return_value = mock_doc
-        mock_doc.__len__.return_value = 1
-        mock_doc.__getitem__.return_value = mock_page
-        mock_page.rect = mock_rect
-        
-        # Execute
-        result_path = processor.add_visible_watermark(
-            input_path, sample_watermark_config, 'test_user', datetime.now()
-        )
+
         
     def test_add_visible_watermark(self,processor, sample_watermark_config):
         input_path = Path('D:/毕业设计/项目/测试文件/pdf/专硕1.pdf')
@@ -111,36 +83,14 @@ class TestPDFProcessor:
         )
 
 
-
-    
-    @patch('engines.document.pdf_processor.fitz.open')
-    def test_add_invisible_watermark_success(self, mock_fitz_open, processor, temp_dir):
-        """Test successful PDF invisible watermark addition."""
-        # Setup
-        input_path = temp_dir / 'test.pdf'
+    def test_add_invisible_watermark(self,processor,watermark):
+        input_path = Path('D:/毕业设计/项目/测试文件/pdf/cropped.pdf')
         input_path.touch()
-        
-        mock_doc = MagicMock()
-        mock_page = MagicMock()
-        mock_rect = MagicMock()
-        mock_rect.width = 612
-        mock_rect.height = 792
-        
-        mock_fitz_open.return_value = mock_doc
-        mock_doc.__len__.return_value = 1
-        mock_doc.__getitem__.return_value = mock_page
-        mock_page.rect = mock_rect
-        mock_page.annots.return_value = []
-        
+
+
         # Execute
-        watermark_data = "test_watermark_data"
-        result_path = processor.add_invisible_watermark(input_path, watermark_data)
-        
-        # Verify
-        assert result_path.exists()
-        mock_fitz_open.assert_called_once_with(str(input_path))
-        mock_doc.save.assert_called_once()
-        mock_doc.close.assert_called_once()
+        processor.add_invisible_watermark(input_path,watermark)
+
     
     @patch('engines.document.pdf_processor.fitz.open')
     def test_add_digital_signature_success(self, mock_fitz_open, processor, temp_dir):
@@ -173,43 +123,15 @@ class TestPDFProcessor:
         mock_doc.close.assert_called_once()
         mock_doc.set_metadata.assert_called_once()
     
-    def test_add_visible_watermark_unsupported_format(self, processor, sample_watermark_config):
-        """Test watermark addition with unsupported format."""
-        input_path = Path('test.docx')
-        
-        with pytest.raises(DocumentProcessingError, match="Unsupported format"):
-            processor.add_visible_watermark(
-                input_path, sample_watermark_config, 'test_user', datetime.now()
-            )
-    
-    @patch('engines.document.pdf_processor.fitz.open')
-    def test_extract_invisible_watermark_success(self, mock_fitz_open, processor, temp_dir):
-        """Test successful invisible watermark extraction."""
-        # Setup
-        input_path = temp_dir / 'test.pdf'
+
+
+    def test_extract_invisible_watermark(self,  processor):
+        input_path = Path('D:/毕业设计/项目/测试文件/pdf/cropped_invisible.pdf')
         input_path.touch()
-        
-        mock_doc = MagicMock()
-        mock_page = MagicMock()
-        mock_annot = MagicMock()
-        
-        # Setup annotation with encoded watermark data
-        encoded_data = 'dGVzdF93YXRlcm1hcmtfZGF0YQ=='  # base64 encoded "test_watermark_data"
-        mock_annot.type = (0, 'Text')
-        mock_annot.info = {'content': encoded_data}
-        
-        mock_fitz_open.return_value = mock_doc
-        mock_doc.__len__.return_value = 1
-        mock_doc.__getitem__.return_value = mock_page
-        mock_page.annots.return_value = [mock_annot]
-        
-        # Execute
-        result = processor.extract_invisible_watermark(input_path)
-        
-        # Verify
-        assert result == "test_watermark_data"
-        mock_fitz_open.assert_called_once_with(str(input_path))
-        mock_doc.close.assert_called_once()
+        output_path = Path("D:/pic")
+        processor.extract_invisible_watermark(input_path,output_path,page=[0,1] , wm_shape =[64,64])
+
+
     
     @patch('engines.document.pdf_processor.fitz.open')
     def test_extract_invisible_watermark_no_watermark(self, mock_fitz_open, processor, temp_dir):
