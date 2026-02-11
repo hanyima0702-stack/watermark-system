@@ -1,0 +1,26 @@
+invisible_watermark:
+  encoding:
+    type: bch
+    n: 127
+    k: 64
+    scramble_seed: 54321
+  macro_block:
+    size: 32
+    header_pattern: '1110010'
+  modulation:
+    strength: 15
+    color_space: yuv
+  extraction:
+    min_confidence: 0.35
+    max_rotation: 45.0
+    max_scale: 2.0
+    enable_180_retry: true
+  performance:
+    enable_gpu: false
+    num_threads: 4
+    enable_cache: true
+  visualization:
+    enabled: false
+    output_dir: ./debug_output
+    save_fft_spectrum: true
+    save_block_map: true

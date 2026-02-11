@@ -1,0 +1,41 @@
+# 64位分块平铺暗水印系统配置文件
+
+invisible_watermark:
+  enabled: true
+  
+  # 编码配置
+  encoding:
+    type: "bch"  # bch或rs
+    n: 127
+    k: 64
+    scramble_seed: 12345
+  
+  # 宏块配置
+  macro_block:
+    size: 32
+    header_pattern: "1110010"
+  
+  # PPM配置
+  modulation:
+    strength: 10
+    color_space: "yuv"
+  
+  # 提取配置
+  extraction:
+    min_confidence: 0.3
+    max_rotation: 45.0
+    max_scale: 2.0
+    enable_180_retry: true
+  
+  # 性能配置
+  performance:
+    enable_gpu: false
+    num_threads: 4
+    enable_cache: true
+  
+  # 可视化配置
+  visualization:
+    enabled: false
+    output_dir: "./debug_output"
+    save_fft_spectrum: true
+    save_block_map: true
