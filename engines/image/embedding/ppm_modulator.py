@@ -5,46 +5,46 @@ from typing import Tuple
 
 class DCTModulator:
     """
-    强鲁棒性 DCT 调制器
-    使用低频系数嵌入，抗缩放、抗模糊、抗JPEG。
+    强鲁棒性 DCT 调制器 (二维分块映射版)
     """
 
     def __init__(self, strength: int = 50):
         self.strength = strength
-        # === 关键修改：使用低频系数 ===
-        # (0,0) 是直流分量(DC)，改动会导致整体亮度闪烁，不能动。
-        # (0,1), (1,0) 是最低频交流分量，最抗缩放，但改动过大容易产生明显的方块效应。
-        # (1,2), (2,1) 是次低频，是抗攻击和画质的最佳平衡点。
         self.c1_pos = (1, 2)
         self.c2_pos = (2, 1)
 
+        # 定义二维网格尺寸 (16 * 8 = 128 bit)
+        self.grid_h = 16
+        self.grid_w = 8
+
     def modulate(self, image: np.ndarray, watermark_data: np.ndarray) -> np.ndarray:
-        """嵌入逻辑"""
         img_float = image.astype(np.float32)
         h, w = img_float.shape
         data_len = len(watermark_data)
 
-        # 遍历所有 8x8 块
+        if data_len != self.grid_h * self.grid_w:
+            raise ValueError(f"水印数据长度必须为 {self.grid_h * self.grid_w}")
+
         for y in range(0, h - 8 + 1, 8):
             for x in range(0, w - 8 + 1, 8):
-                # 对角线索引，抗裁剪
                 r, c = y // 8, x // 8
-                bit_idx = (r + c) % data_len
+
+                # === 核心改进：二维网格映射 ===
+                block_r = r % self.grid_h
+                block_c = c % self.grid_w
+                bit_idx = block_r * self.grid_w + block_c
+
                 bit = watermark_data[bit_idx]
 
-                # 提取块
                 block = img_float[y:y + 8, x:x + 8]
                 dct_block = cv2.dct(block)
 
                 v1 = dct_block[self.c1_pos]
                 v2 = dct_block[self.c2_pos]
 
-                # 嵌入 Bit (使用加法调制，更稳定)
-                # Bit 1: v1 必须比 v2 大 strength
-                # Bit 0: v2 必须比 v1 大 strength
                 if bit == 1:
                     if v1 <= v2 + self.strength:
-                        diff = (v2 + self.strength - v1) / 2.0 + 1.0  # +1 为了容错
+                        diff = (v2 + self.strength - v1) / 2.0 + 1.0
                         v1 += diff
                         v2 -= diff
                 else:
@@ -56,15 +56,14 @@ class DCTModulator:
                 dct_block[self.c1_pos] = v1
                 dct_block[self.c2_pos] = v2
 
-                # IDCT
                 img_float[y:y + 8, x:x + 8] = cv2.idct(dct_block)
 
         return np.clip(img_float, 0, 255).astype(np.uint8)
 
-    def demodulate(self, image: np.ndarray) -> Tuple[np.ndarray, np.ndarray, int, int]:
-        """
-        提取逻辑：返回软判决值（Soft Decision）
-        """
+    def demodulate(self, image: np.ndarray):
+        # demodulate 逻辑无需改变，它只负责提取每一个 8x8 块的原始差值
+        # 具体的二维重组逻辑在 Processor 中处理，以保持类的职责单一
+        # ... (保留原有的 demodulate 代码) ...
         img_float = image.astype(np.float32)
         h, w = img_float.shape
 
@@ -86,8 +85,6 @@ class DCTModulator:
                 v1 = dct_block[self.c1_pos]
                 v2 = dct_block[self.c2_pos]
 
-                # 记录差值：正值代表1倾向，负值代表0倾向
-                # 差值越大，置信度越高
                 raw_diffs[idx] = v1 - v2
                 idx += 1
 

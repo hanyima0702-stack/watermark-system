@@ -141,46 +141,54 @@ class InvisibleWatermarkProcessor:
 
     def _decode_soft_with_retry(self, raw_diffs, rows, cols):
         """
-        软投票解码 + 循环移位
+        二维软投票解码 + 二维循环移位
         """
-        n = 128
-        votes = np.zeros(n, dtype=np.float32)
-        counts = np.zeros(n, dtype=np.int32)
+        grid_h, grid_w = 16, 8
 
-        # 1. 对角线折叠 + 软累加
-        # 即使被剪裁，(r+c) 的相对关系不变
+        # 1. 使用 2D 矩阵进行投票和计数
+        votes = np.zeros((grid_h, grid_w), dtype=np.float32)
+        counts = np.zeros((grid_h, grid_w), dtype=np.int32)
+
         idx = 0
         for r in range(rows):
             for c in range(cols):
-                bit_pos = (r + c) % n
-                votes[bit_pos] += raw_diffs[idx]
-                counts[bit_pos] += 1
+                # === 核心改进：将线性提取出的差值折叠回二维网格 ===
+                block_r = r % grid_h
+                block_c = c % grid_w
+
+                votes[block_r, block_c] += raw_diffs[idx]
+                counts[block_r, block_c] += 1
                 idx += 1
 
-        # 2. 归一化
+        # 2. 归一化处理
         counts[counts == 0] = 1
         votes = votes / counts
 
-        # 3. 生成候选 Bit
-        candidate = np.zeros(n, dtype=np.uint8)
-        candidate[votes > 0] = 1
+        # 3. 生成候选的二维 Bit 矩阵
+        candidate_grid = np.zeros((grid_h, grid_w), dtype=np.uint8)
+        candidate_grid[votes > 0] = 1
 
-        # 计算这一轮的置信度 (平均信号强度)
         confidence = np.mean(np.abs(votes))
 
-        # 4. 循环移位搜索 (解决剪裁导致的整体位移)
-        # 只有当信号强度足够时才尝试解码 (再次剪枝)
         if confidence < 8.0:
             return None, False, confidence
 
-        for shift in range(n):
-            shifted = np.roll(candidate, -shift)
-            try:
-                descrambled = self.scrambler.descramble(shifted)
-                data, success = self.ecc_encoder.decode(descrambled)
-                if success:
-                    return data, True, confidence
-            except:
-                continue
+        # 4. 二维循环移位搜索 (解决任意起点的剪裁导致的数据平移)
+        # 遍历所有可能的 (行偏移, 列偏移) 组合
+        for shift_r in range(grid_h):
+            for shift_c in range(grid_w):
+                # 同时在行(axis=0)和列(axis=1)上进行循环移位
+                shifted_grid = np.roll(candidate_grid, shift=(-shift_r, -shift_c), axis=(0, 1))
+
+                # 展平回 1D 的 128 位数组送入解码器
+                shifted_flat = shifted_grid.flatten()
+
+                try:
+                    descrambled = self.scrambler.descramble(shifted_flat)
+                    data, success = self.ecc_encoder.decode(descrambled)
+                    if success:
+                        return data, True, confidence
+                except:
+                    continue
 
         return None, False, confidence

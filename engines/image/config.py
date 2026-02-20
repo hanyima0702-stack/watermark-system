@@ -25,13 +25,13 @@ class WatermarkConfig:
 
     # === 增强 1: 调制强度大幅提升 ===
     # 以前是 30，现在提升到 50 甚至更高，低频系数数值大，需要更大的修改量才能抗住干扰
-    modulation_strength: int = 50
+    modulation_strength: int = 80
     block_size: int = 8
 
     # === 增强 2: 分辨率金字塔搜索步长 ===
     # 提取时，将图片缩放到这些宽度尝试提取
     # 范围覆盖极小图到大图，步长越小越慢但越准
-    search_step: int = 32
+    search_step: int = 8
     min_width: int = 128
     max_width: int = 1024  # 如果你的原图是 4K，这里可以设大一点，比如 2048
 
