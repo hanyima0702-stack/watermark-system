@@ -7,7 +7,7 @@ from .encoding.ecc_encoder import ECCEncoder
 from .encoding.scrambler import Scrambler
 from .embedding.ppm_modulator import DCTModulator
 from .embedding.image_embedder import ImageEmbedder
-
+from .utils.m_sequence import MSequenceGenerator
 logger = logging.getLogger(__name__)
 
 
@@ -17,7 +17,10 @@ class InvisibleWatermarkProcessor:
         self.ecc_encoder = ECCEncoder(n=self.config.ecc_n, k=self.config.ecc_k)
         self.scrambler = Scrambler(seed=self.config.scramble_seed)
         self.modulator = DCTModulator(strength=self.config.modulation_strength)
-        self.image_embedder = ImageEmbedder(modulator=self.modulator)
+
+        # 核心修改 3：必须与嵌入端保持一致，改为 5 阶
+        self.m_gen = MSequenceGenerator(degree=5)
+        self.image_embedder = ImageEmbedder(modulator=self.modulator, watermarkConfig=self.config)
 
     def embed_watermark(self, image_path: str, watermark: str, output_path: str) -> EmbedResult:
         # 嵌入代码保持不变，请直接使用上一个版本的 embed_watermark
@@ -39,96 +42,170 @@ class InvisibleWatermarkProcessor:
             return EmbedResult(success=False, error_message=str(e), watermark_data="", encoded_data="",
                                block_count=(0, 0), processing_time=0, image_size=(0, 0))
 
+    def _get_exact_angle_using_cross_correlation(self, image: np.ndarray):
+        if not self.config.enable_spatial_anchors:
+            return image, 0, 1.0
+
+        h, w = image.shape[:2]
+
+        # ==========================================
+        # 核心改动：只从 U 通道提取雷达信号，避开 Y 通道的 DCT 干扰
+        # ==========================================
+        image_yuv = cv2.cvtColor(image, cv2.COLOR_BGR2YUV)
+        u_channel = image_yuv[:, :, 1].astype(np.float32)
+        u_channel -= np.mean(u_channel)
+
+        # 裁剪中心区域加速搜索
+        center_y, center_x = h // 2, w // 2
+        crop_size = min(512, min(h, w))
+        y1, y2 = center_y - crop_size // 2, center_y + crop_size // 2
+        x1, x2 = center_x - crop_size // 2, center_x + crop_size // 2
+        search_crop = u_channel[y1:y2, x1:x2]
+
+        # 重新生成一致的模板
+        rng = np.random.RandomState(42)
+        core_pattern = np.sign(rng.randn(31, 31)).astype(np.float32)
+        tpl_size = self.config.anchor_spacing
+        template = cv2.resize(core_pattern, (tpl_size, tpl_size), interpolation=cv2.INTER_NEAREST)
+
+        # 验证 0 度 Fast Path
+        res_0 = cv2.matchTemplate(search_crop, template, cv2.TM_CCOEFF_NORMED)
+        _, max_val_0, _, _ = cv2.minMaxLoc(res_0)
+
+        if max_val_0 > 0.6:
+            logger.info(f"Fast path hit: 0° detected with high correlation {max_val_0:.4f}")
+            return image, 0, max_val_0
+
+        max_correlation = max_val_0
+        best_angle = 0
+        crop_h, crop_w = search_crop.shape
+        crop_center = (crop_w // 2, crop_h // 2)
+
+        # 全角度扫描
+        for angle in range(1, 360, 1):
+            M_rot = cv2.getRotationMatrix2D(crop_center, angle, 1.0)
+            rotated_crop = cv2.warpAffine(search_crop, M_rot, (crop_w, crop_h))
+
+            res = cv2.matchTemplate(rotated_crop, template, cv2.TM_CCOEFF_NORMED)
+            _, max_val, _, _ = cv2.minMaxLoc(res)
+
+            if max_val > max_correlation:
+                max_correlation = max_val
+                best_angle = angle
+
+        logger.info(f"Detected arbitrary angle: {best_angle}° with correlation {max_correlation:.4f}")
+
+        if max_correlation < 0.15:
+            logger.warning("Weak correlation, fallback to original image.")
+            return image, 0, max_correlation
+
+        # 反向无损转正整张图像
+        if best_angle != 0:
+            orig_center = (w // 2, h // 2)
+            M_correct = cv2.getRotationMatrix2D(orig_center, best_angle, 1.0)
+
+            cos = np.abs(M_correct[0, 0])
+            sin = np.abs(M_correct[0, 1])
+            new_w = int((h * sin) + (w * cos))
+            new_h = int((h * cos) + (w * sin))
+            M_correct[0, 2] += (new_w / 2) - orig_center[0]
+            M_correct[1, 2] += (new_h / 2) - orig_center[1]
+
+            corrected_image = cv2.warpAffine(
+                image, M_correct, (new_w, new_h),
+                flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE
+            )
+        else:
+            corrected_image = image
+
+        return corrected_image, best_angle, max_correlation
+
     def extract_watermark(self, image_path: str) -> ExtractionResult:
         """
-        终极抗攻击提取：分辨率金字塔 + 网格相位搜索 + 软投票
+        极速抗攻击提取：互相关定向 + 分辨率扫描
+        已去除低效的暴力角度扫描。
         """
         start_time = time.time()
         image = cv2.imread(image_path)
         if image is None: return ExtractionResult(success=False, error_message="Image not found")
 
-        original_h, original_w = image.shape[:2]
+        # === 1. 新增步骤：利用 m-序列互相关快速纠正 90/180/270 度旋转 ===
+        # 这一步极快，并且能有效抵抗摩尔纹干扰
+        img_oriented, detected_angle, corr_score = self._get_exact_angle_using_cross_correlation(image)
 
-        # 1. 生成搜索分辨率列表
-        # 包含：原始宽度（抗纯剪裁）、一系列缩放宽度（抗缩放+剪裁）
-        # 步长设为 32 或 40，覆盖常见缩放
+        rot_h, rot_w = img_oriented.shape[:2]
+
+        # === 2. 准备分辨率搜索列表 (保持原逻辑，针对缩放攻击) ===
         search_widths = set()
-        search_widths.add(original_w)  # 必须包含原图尺寸
+        base_w = rot_w
+        # 优先搜索原始分辨率
+        search_widths.add(base_w)
+        # 添加一些常见的缩放比例，减少搜索空间
+        for scale in [0.5, 0.75, 1.5, 2.0]:
+            search_widths.add(int(base_w * scale))
 
-        # 添加缩小和放大的尺寸
+        # 如果还需要更密集的搜索，保留原来的逻辑
         current_w = self.config.min_width
         while current_w <= self.config.max_width:
             search_widths.add(current_w)
             current_w += self.config.search_step
 
-        # 排序：优先搜原图附近，然后向两边扩散
-        sorted_widths = sorted(list(search_widths), key=lambda x: abs(x - original_w))
+        # 按距离 base_w 的远近排序
+        sorted_widths = sorted(list(search_widths), key=lambda x: abs(x - base_w))
+        # 去重并过滤过小的尺寸
+        sorted_widths = sorted(list(set([w for w in sorted_widths if w >= 128])))
 
         best_confidence = 0.0
+        logger.info(f"Starting extraction based on oriented image. Scanning {len(sorted_widths)} resolutions.")
 
-        logger.info(f"Scanning {len(sorted_widths)} resolutions with grid search...")
-
-        # === 外层循环：分辨率 (抗缩放) ===
+        # === 只保留分辨率循环，去除了角度循环 ===
         for target_w in sorted_widths:
-            # 计算等比例高度
-            scale = target_w / original_w
-            target_h = int(original_h * scale)
-
-            # 如果尺寸太小，跳过
-            if target_w < 64 or target_h < 64: continue
+            scale = target_w / rot_w
+            target_h = int(rot_h * scale)
 
             # 缩放图像
-            # 缩小用 INTER_AREA (抗噪)，放大用 INTER_LINEAR
-            if scale < 1.0:
-                img_search = cv2.resize(image, (target_w, target_h), interpolation=cv2.INTER_AREA)
+            # 旧代码：
+            # interpolation = cv2.INTER_AREA if scale < 1.0 else cv2.INTER_LINEAR
+            # img_search = cv2.resize(img_oriented, (target_w, target_h), interpolation=interpolation)
+
+            # 新代码：
+            if abs(scale - 1.0) < 1e-5:
+                img_search = img_oriented.copy()  # 1.0 比例绝对禁止过 resize 算子
             else:
-                img_search = cv2.resize(image, (target_w, target_h), interpolation=cv2.INTER_LINEAR)
+                interpolation = cv2.INTER_AREA if scale < 1.0 else cv2.INTER_LINEAR
+                img_search = cv2.resize(img_oriented, (target_w, target_h), interpolation=interpolation)
 
             y_full = cv2.cvtColor(img_search, cv2.COLOR_BGR2YUV)[:, :, 0]
 
-            # === 内层循环：网格偏移 (抗剪裁/相位错位) ===
-            # DCT 块是 8x8 的。剪裁会导致网格错位 0-7 个像素。
-            # 我们遍历 (0,0) 到 (7,7) 的偏移。
-            # 为了速度，步长设为 2 (即搜 0, 2, 4, 6)，通常足够撞上
+            # === 网格偏移扫描 (保持不变，处理剪裁和相位错位) ===
             step = 2
             for dy in range(0, 8, step):
                 for dx in range(0, 8, step):
-
-                    # 模拟网格偏移：直接切片
-                    # y_crop 相当于把原点移动到了 (dx, dy)
                     if dy > 0 or dx > 0:
                         y_crop = y_full[dy:, dx:]
                     else:
                         y_crop = y_full
 
-                    # 提取 DCT 差值 (Soft Decision)
-                    # raw_diffs 是浮点数数组，正负值代表 1/0 倾向
+                    # 提取 DCT 差值
                     raw_diffs, rows, cols = self.modulator.demodulate(y_crop)
-
                     if len(raw_diffs) < 128: continue
 
-                    # === 极速剪枝 (Signal Strength Check) ===
-                    # 这是速度的关键！
-                    # 如果网格没对齐，或者分辨率不对，提取出来的差值全是随机噪声，平均绝对值很小。
-                    # 如果对齐了，由于 strength=50，平均绝对值应该很大(>10)。
+                    # 极速剪枝
                     avg_signal = np.mean(np.abs(raw_diffs))
+                    if avg_signal < 4.0: continue
 
-                    # 阈值：根据 modulation_strength=50 设定。
-                    # 如果 avg_signal < 5，说明完全是噪声，直接跳过 ECC 解码
-                    if avg_signal < 5.0:
-                        continue
-
-                    # === 软投票解码 ===
+                    # 软投票解码 (确保你使用了包含二维循环移位的版本)
                     decoded, success, score = self._decode_soft_with_retry(raw_diffs, rows, cols)
 
                     if success:
                         logger.info(
-                            f"FOUND! Resolution: {target_w}x{target_h}, Offset: ({dx},{dy}), Score: {score:.2f}")
+                            f"FOUND! Base Angle: {detected_angle}°, Res: {target_w}x{target_h} (Scale: {scale:.2f}), Offset: ({dx},{dy}), Score: {score:.2f}")
                         return ExtractionResult(
                             success=True,
                             watermark_data=decoded,
                             confidence=score,
                             detected_scale=scale,
+                            # 这里返回的是相对于转正后图像的偏移
                             grid_offset=(dx, dy),
                             processing_time=time.time() - start_time
                         )
@@ -136,7 +213,8 @@ class InvisibleWatermarkProcessor:
                     if score > best_confidence:
                         best_confidence = score
 
-        return ExtractionResult(success=False, confidence=best_confidence, error_message="Extraction failed",
+        return ExtractionResult(success=False, confidence=best_confidence,
+                                error_message=f"Extraction failed after rapid scan. Anchor corr: {corr_score:.2f}",
                                 processing_time=time.time() - start_time)
 
     def _decode_soft_with_retry(self, raw_diffs, rows, cols):

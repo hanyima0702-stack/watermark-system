@@ -1,9 +1,21 @@
 from engines.image.invisible_watermark import InvisibleWatermarkProcessor
-
+from PIL import Image
+import math
 
 class Test:
 
     watermark = "1010101010101010101010101010101010101010101010101010101010101010"
+
+
+    def testrotate(self):
+
+
+        img = Image.open("D:/pic/watermarked.png")
+
+        # 旋转图片
+        # fillcolor可以设置填充色，如'white'或(255,255,255)
+        rotated_img = img.rotate(angle=166)
+        rotated_img.save("D:/pic/watermarked1.png")
 
     def testEmbed(self):
         # 初始化处理器
@@ -29,7 +41,7 @@ class Test:
 
         # ========== 提取水印 ==========
         extract_result = processor.extract_watermark(
-            image_path="D:/pic/watermarked1.png"  # 带水印的图像
+            image_path="D:/pic/watermarked2.jpg"  # 带水印的图像
         )
 
         if extract_result.success:
