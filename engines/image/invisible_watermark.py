@@ -47,57 +47,129 @@ class InvisibleWatermarkProcessor:
             return image, 0, 1.0
 
         h, w = image.shape[:2]
+        # ==========================================
+        # 1. 转灰度
+        # ==========================================
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
 
         # ==========================================
-        # 核心改动：只从 U 通道提取雷达信号，避开 Y 通道的 DCT 干扰
+        # 2. 终极显影：CLAHE (对比度受限自适应直方图均衡)
+        # 这一步极其关键！它能把屏摄后被压缩到只剩 1 个像素差的微弱波动，
+        # 强行拉伸到 20-30 的色阶差，让雷达重新“看见”锚点。
         # ==========================================
-        image_yuv = cv2.cvtColor(image, cv2.COLOR_BGR2YUV)
-        u_channel = image_yuv[:, :, 1].astype(np.float32)
-        u_channel -= np.mean(u_channel)
+        clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
+        gray_enhanced = clahe.apply(gray)
 
-        # 裁剪中心区域加速搜索
+        # ==========================================
+        # 3. 高斯模糊去摩尔纹 (作用于增强后的图像)
+        # ==========================================
+        gray_blurred = cv2.GaussianBlur(gray_enhanced, (5, 5), 0).astype(np.float32)
+        gray_blurred -= np.mean(gray_blurred)
+
+        # 截取超大安全区，必须扩大到 1024 才能装得下被放大的物理模板
         center_y, center_x = h // 2, w // 2
-        crop_size = min(512, min(h, w))
-        y1, y2 = center_y - crop_size // 2, center_y + crop_size // 2
-        x1, x2 = center_x - crop_size // 2, center_x + crop_size // 2
-        search_crop = u_channel[y1:y2, x1:x2]
+        safe_crop_size = 1024
 
-        # 重新生成一致的模板
+        y1, y2 = max(0, center_y - safe_crop_size // 2), min(h, center_y + safe_crop_size // 2)
+        x1, x2 = max(0, center_x - safe_crop_size // 2), min(w, center_x + safe_crop_size // 2)
+
+        search_crop_large = gray_blurred[y1:y2, x1:x2]
+
+        pad_bottom = safe_crop_size - search_crop_large.shape[0]
+        pad_right = safe_crop_size - search_crop_large.shape[1]
+        if pad_bottom > 0 or pad_right > 0:
+            search_crop_large = cv2.copyMakeBorder(
+                search_crop_large, 0, pad_bottom, 0, pad_right, cv2.BORDER_REPLICATE
+            )
+
+        large_h, large_w = search_crop_large.shape
+        large_center = (large_w // 2, large_h // 2)
+
+        # 核心图案
         rng = np.random.RandomState(42)
         core_pattern = np.sign(rng.randn(31, 31)).astype(np.float32)
-        tpl_size = self.config.anchor_spacing
-        template = cv2.resize(core_pattern, (tpl_size, tpl_size), interpolation=cv2.INTER_NEAREST)
 
-        # 验证 0 度 Fast Path
-        res_0 = cv2.matchTemplate(search_crop, template, cv2.TM_CCOEFF_NORMED)
-        _, max_val_0, _, _ = cv2.minMaxLoc(res_0)
-
-        if max_val_0 > 0.6:
-            logger.info(f"Fast path hit: 0° detected with high correlation {max_val_0:.4f}")
-            return image, 0, max_val_0
-
-        max_correlation = max_val_0
+        best_correlation = -1.0
         best_angle = 0
-        crop_h, crop_w = search_crop.shape
-        crop_center = (crop_w // 2, crop_h // 2)
+        best_scale = 1.0
 
-        # 全角度扫描
-        for angle in range(1, 360, 1):
-            M_rot = cv2.getRotationMatrix2D(crop_center, angle, 1.0)
-            rotated_crop = cv2.warpAffine(search_crop, M_rot, (crop_w, crop_h))
+        # ==========================================
+        # 2. 核心修复：多尺度金字塔扫描 (对抗手机像素缩放)
+        # ==========================================
+        # 如果手机像素高或者拍得近，照片里的锚点会被放大 (1.5x - 3.0x)
+        # 如果距离远，锚点会缩小 (0.5x - 0.75x)
+        scales = [0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0]
 
-            res = cv2.matchTemplate(rotated_crop, template, cv2.TM_CCOEFF_NORMED)
-            _, max_val, _, _ = cv2.minMaxLoc(res)
+        for scale in scales:
+            current_tpl_size = int(self.config.anchor_spacing * scale)
+            # 模板不能大过我们的搜索框
+            if current_tpl_size > 512: continue
 
-            if max_val > max_correlation:
-                max_correlation = max_val
-                best_angle = angle
+            # 根据当前的物理缩放猜测，生成对应大小的钥匙
+            template = cv2.resize(core_pattern, (current_tpl_size, current_tpl_size), interpolation=cv2.INTER_NEAREST)
 
-        logger.info(f"Detected arbitrary angle: {best_angle}° with correlation {max_correlation:.4f}")
+            # 动态计算提取纯净内框的大小 (模板尺寸 + 128像素的滑动位移余量)
+            clean_size = current_tpl_size + 128
+            start_y = large_center[1] - clean_size // 2
+            start_x = large_center[0] - clean_size // 2
 
-        if max_correlation < 0.15:
+            # 极速粗搜：步长改为 5 度，快速定位方向
+            for angle in range(0, 360, 5):
+                M_rot = cv2.getRotationMatrix2D(large_center, angle, 1.0)
+                rotated_large = cv2.warpAffine(
+                    search_crop_large, M_rot, (large_w, large_h), borderMode=cv2.BORDER_REPLICATE
+                )
+
+                # 完美避开边缘畸变的纯净内框
+                clean_crop = rotated_large[start_y:start_y + clean_size, start_x:start_x + clean_size]
+
+                res = cv2.matchTemplate(clean_crop, template, cv2.TM_CCOEFF_NORMED)
+                _, max_val, _, _ = cv2.minMaxLoc(res)
+
+                if max_val > best_correlation:
+                    best_correlation = max_val
+                    best_angle = angle
+                    best_scale = scale
+
+        logger.info(f"Coarse scan found: Angle {best_angle}°, Scale {best_scale}x with corr {best_correlation:.4f}")
+
+        # ==========================================
+        # 3. 精细微调：在最佳尺度下，寻找 1 度的绝对精准角度
+        # ==========================================
+        if best_correlation > 0.15:
+            current_tpl_size = int(self.config.anchor_spacing * best_scale)
+            template = cv2.resize(core_pattern, (current_tpl_size, current_tpl_size), interpolation=cv2.INTER_NEAREST)
+            clean_size = current_tpl_size + 128
+            start_y = large_center[1] - clean_size // 2
+            start_x = large_center[0] - clean_size // 2
+
+            fine_best_corr = best_correlation
+            fine_best_angle = best_angle
+
+            for angle in range(best_angle - 4, best_angle + 5, 1):
+                if angle == best_angle: continue
+
+                M_rot = cv2.getRotationMatrix2D(large_center, angle, 1.0)
+                rotated_large = cv2.warpAffine(
+                    search_crop_large, M_rot, (large_w, large_h), borderMode=cv2.BORDER_REPLICATE
+                )
+                clean_crop = rotated_large[start_y:start_y + clean_size, start_x:start_x + clean_size]
+
+                res = cv2.matchTemplate(clean_crop, template, cv2.TM_CCOEFF_NORMED)
+                _, max_val, _, _ = cv2.minMaxLoc(res)
+
+                if max_val > fine_best_corr:
+                    fine_best_corr = max_val
+                    fine_best_angle = angle
+
+            best_angle = fine_best_angle
+            best_correlation = fine_best_corr
+
+        logger.info(f"Final Detected Arbitrary Angle: {best_angle}° with correlation {best_correlation:.4f}")
+
+        if best_correlation < 0.15:
             logger.warning("Weak correlation, fallback to original image.")
-            return image, 0, max_correlation
+            return image, 0, best_correlation
 
         # 反向无损转正整张图像
         if best_angle != 0:
@@ -118,7 +190,7 @@ class InvisibleWatermarkProcessor:
         else:
             corrected_image = image
 
-        return corrected_image, best_angle, max_correlation
+        return corrected_image, best_angle, best_correlation
 
     def extract_watermark(self, image_path: str) -> ExtractionResult:
         """

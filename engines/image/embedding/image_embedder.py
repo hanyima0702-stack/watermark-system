@@ -29,18 +29,11 @@ class ImageEmbedder:
 
     def embed(self, image: np.ndarray, watermark_data: np.ndarray) -> np.ndarray:
         cfg = self.watermarkConfig
-        image_yuv = cv2.cvtColor(image, cv2.COLOR_BGR2YUV)
 
         # ==========================================
-        # 通道 1: 在 Y (亮度) 通道嵌入 DCT 水印
+        # 1. 铺设强鲁棒性空间锚点 (全通道覆盖)
         # ==========================================
-        y_channel = image_yuv[:, :, 0].copy()
-        y_modulated = self.modulator.modulate(y_channel, watermark_data)
-        image_yuv[:, :, 0] = y_modulated
-
-        # ==========================================
-        # 通道 2: 在 U (色度) 通道铺设空间锚点
-        # ==========================================
+        img_float = image.astype(np.float32)
         if cfg.enable_spatial_anchors and cfg.anchor_strength > 0:
             h, w = image.shape[:2]
             anchor_patch = self._generate_anchor_pattern(cfg.anchor_spacing)
@@ -52,10 +45,19 @@ class ImageEmbedder:
                     patch_w = min(cfg.anchor_spacing, w - x)
                     noise_layer[y:y + patch_h, x:x + patch_w] = anchor_patch[:patch_h, :patch_w]
 
-            # 提取 U 通道，叠加锚点，再放回去
-            u_float = image_yuv[:, :, 1].astype(np.float32)
-            u_float += noise_layer * cfg.anchor_strength
-            image_yuv[:, :, 1] = np.clip(u_float, 0, 255).astype(np.uint8)
+            # 直接加到 BGR 全通道，极其抗色彩压缩
+            noise_delta = noise_layer * cfg.anchor_strength
+            img_float += noise_delta[:, :, np.newaxis]
 
-        # 合并通道转回 BGR
+        anchored_bgr = np.clip(img_float, 0, 255).astype(np.uint8)
+
+        # ==========================================
+        # 2. 转换 YUV 并在 Y 通道执行 DCT
+        # ==========================================
+        image_yuv = cv2.cvtColor(anchored_bgr, cv2.COLOR_BGR2YUV)
+        y_channel = image_yuv[:, :, 0].copy()
+
+        y_modulated = self.modulator.modulate(y_channel, watermark_data)
+        image_yuv[:, :, 0] = y_modulated
+
         return cv2.cvtColor(image_yuv, cv2.COLOR_YUV2BGR)

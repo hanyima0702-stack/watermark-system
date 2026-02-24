@@ -1,6 +1,7 @@
 from engines.image.invisible_watermark import InvisibleWatermarkProcessor
-from PIL import Image
-import math
+from PIL import Image, ImageEnhance
+import cv2
+import numpy as np
 
 class Test:
 
@@ -16,6 +17,20 @@ class Test:
         # fillcolor可以设置填充色，如'white'或(255,255,255)
         rotated_img = img.rotate(angle=166)
         rotated_img.save("D:/pic/watermarked1.png")
+
+
+    def testBrightness(self):
+        img = Image.open("D:/pic/watermarked.png")
+
+        # 创建亮度增强器
+        enhancer = ImageEnhance.Brightness(img)
+
+        # 调整亮度
+        adjusted = enhancer.enhance(0.5)
+
+        # 保存图片
+        adjusted.save("D:/pic/watermarked1.png")
+
 
     def testEmbed(self):
         # 初始化处理器

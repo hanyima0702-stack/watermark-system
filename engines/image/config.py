@@ -25,7 +25,7 @@ class WatermarkConfig:
 
     # === 增强 1: 调制强度大幅提升 ===
     # 以前是 30，现在提升到 50 甚至更高，低频系数数值大，需要更大的修改量才能抗住干扰
-    modulation_strength: int = 80
+    modulation_strength: int = 200
     block_size: int = 8
 
     # === 增强 2: 分辨率金字塔搜索步长 ===
@@ -42,7 +42,7 @@ class WatermarkConfig:
     # 是否启用空间锚点
     enable_spatial_anchors: bool = True
     # 锚点强度：越强越抗屏摄，但可见性越高。建议 1-3 之间非常微弱的值
-    anchor_strength: int = 2
+    anchor_strength: int = 10
     # 锚点网格间距：越小网格越密。64或128是常用值
     anchor_spacing: int = 128
     # 锚点种子，用于生成固定的噪声图案
