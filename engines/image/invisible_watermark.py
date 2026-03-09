@@ -98,7 +98,8 @@ class InvisibleWatermarkProcessor:
         # ==========================================
         # 如果手机像素高或者拍得近，照片里的锚点会被放大 (1.5x - 3.0x)
         # 如果距离远，锚点会缩小 (0.5x - 0.75x)
-        scales = [0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0]
+        #scales = [0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0]
+        scales = [1.0]
 
         for scale in scales:
             current_tpl_size = int(self.config.anchor_spacing * scale)

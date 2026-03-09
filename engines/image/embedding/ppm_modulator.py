@@ -1,91 +1,80 @@
-import cv2
+# fast_modulator.py
 import numpy as np
-from typing import Tuple
-
+from scipy.fft import dctn, idctn
 
 class DCTModulator:
     """
-    强鲁棒性 DCT 调制器 (二维分块映射版)
+    工业级极速 DCT 调制器 (全矩阵化/向量化实现)
+    彻底消灭 Python for 循环
     """
-
-    def __init__(self, strength: int = 50):
+    def __init__(self, strength: int = 100):
         self.strength = strength
-        self.c1_pos = (1, 2)
-        self.c2_pos = (2, 1)
-
-        # 定义二维网格尺寸 (16 * 8 = 128 bit)
+        self.c1 = (1, 2)
+        self.c2 = (2, 1)
         self.grid_h = 16
         self.grid_w = 8
 
     def modulate(self, image: np.ndarray, watermark_data: np.ndarray) -> np.ndarray:
         img_float = image.astype(np.float32)
         h, w = img_float.shape
-        data_len = len(watermark_data)
 
-        if data_len != self.grid_h * self.grid_w:
-            raise ValueError(f"水印数据长度必须为 {self.grid_h * self.grid_w}")
+        # 1. 向下取整到 8 的倍数，防止边缘报错
+        h_trunc = (h // 8) * 8
+        w_trunc = (w // 8) * 8
+        work_img = img_float[:h_trunc, :w_trunc]
 
-        for y in range(0, h - 8 + 1, 8):
-            for x in range(0, w - 8 + 1, 8):
-                r, c = y // 8, x // 8
+        # 2. 图像重塑为 4D 块矩阵: (块行数, 块列数, 8, 8)
+        # 这是向量化的核心魔法，一行代码完成图像切块
+        blocks = work_img.reshape(h_trunc // 8, 8, w_trunc // 8, 8).transpose(0, 2, 1, 3)
 
-                # === 核心改进：二维网格映射 ===
-                block_r = r % self.grid_h
-                block_c = c % self.grid_w
-                bit_idx = block_r * self.grid_w + block_c
+        # 3. 批量执行二维 DCT (利用 scipy 底层 C 库)
+        dct_blocks = dctn(blocks, axes=(2, 3), norm='ortho')
 
-                bit = watermark_data[bit_idx]
+        # 4. 生成与图像等大的全屏水印二维网格
+        wm_grid = watermark_data.reshape(self.grid_h, self.grid_w)
+        repeats_y = int(np.ceil(dct_blocks.shape[0] / self.grid_h))
+        repeats_x = int(np.ceil(dct_blocks.shape[1] / self.grid_w))
+        full_wm = np.tile(wm_grid, (repeats_y, repeats_x))[:dct_blocks.shape[0], :dct_blocks.shape[1]]
 
-                block = img_float[y:y + 8, x:x + 8]
-                dct_block = cv2.dct(block)
+        # 5. 提取特征系数并批量计算差值
+        v1 = dct_blocks[:, :, self.c1[0], self.c1[1]]
+        v2 = dct_blocks[:, :, self.c2[0], self.c2[1]]
+        diff = np.zeros_like(v1)
 
-                v1 = dct_block[self.c1_pos]
-                v2 = dct_block[self.c2_pos]
+        # 向量化判定条件: 比特位为 1
+        mask_1 = (full_wm == 1) & (v1 <= v2 + self.strength)
+        diff[mask_1] = (v2[mask_1] + self.strength - v1[mask_1]) / 2.0 + 1.0
 
-                if bit == 1:
-                    if v1 <= v2 + self.strength:
-                        diff = (v2 + self.strength - v1) / 2.0 + 1.0
-                        v1 += diff
-                        v2 -= diff
-                else:
-                    if v2 <= v1 + self.strength:
-                        diff = (v1 + self.strength - v2) / 2.0 + 1.0
-                        v2 += diff
-                        v1 -= diff
+        # 向量化判定条件: 比特位为 0
+        mask_0 = (full_wm == 0) & (v2 <= v1 + self.strength)
+        diff[mask_0] = (v1[mask_0] + self.strength - v2[mask_0]) / 2.0 + 1.0
 
-                dct_block[self.c1_pos] = v1
-                dct_block[self.c2_pos] = v2
+        # 6. 批量施加修改
+        dct_blocks[:, :, self.c1[0], self.c1[1]] += np.where(full_wm == 1, diff, -diff)
+        dct_blocks[:, :, self.c2[0], self.c2[1]] -= np.where(full_wm == 1, diff, -diff)
 
-                img_float[y:y + 8, x:x + 8] = cv2.idct(dct_block)
+        # 7. 批量执行逆 DCT 并拼回原图
+        idct_blocks = idctn(dct_blocks, axes=(2, 3), norm='ortho')
+        reconstructed = idct_blocks.transpose(0, 2, 1, 3).reshape(h_trunc, w_trunc)
 
+        img_float[:h_trunc, :w_trunc] = reconstructed
         return np.clip(img_float, 0, 255).astype(np.uint8)
 
     def demodulate(self, image: np.ndarray):
-        # demodulate 逻辑无需改变，它只负责提取每一个 8x8 块的原始差值
-        # 具体的二维重组逻辑在 Processor 中处理，以保持类的职责单一
-        # ... (保留原有的 demodulate 代码) ...
+        """极速解调提取"""
         img_float = image.astype(np.float32)
         h, w = img_float.shape
 
-        blocks_h = h // 8
-        blocks_w = w // 8
-        num_blocks = blocks_h * blocks_w
+        h_trunc = (h // 8) * 8
+        w_trunc = (w // 8) * 8
+        work_img = img_float[:h_trunc, :w_trunc]
 
-        if num_blocks == 0:
-            return np.array([]), np.array([]), 0, 0
+        blocks = work_img.reshape(h_trunc // 8, 8, w_trunc // 8, 8).transpose(0, 2, 1, 3)
+        dct_blocks = dctn(blocks, axes=(2, 3), norm='ortho')
 
-        raw_diffs = np.zeros(num_blocks, dtype=np.float32)
+        v1 = dct_blocks[:, :, self.c1[0], self.c1[1]]
+        v2 = dct_blocks[:, :, self.c2[0], self.c2[1]]
 
-        idx = 0
-        for y in range(0, blocks_h * 8, 8):
-            for x in range(0, blocks_w * 8, 8):
-                block = img_float[y:y + 8, x:x + 8]
-                dct_block = cv2.dct(block)
-
-                v1 = dct_block[self.c1_pos]
-                v2 = dct_block[self.c2_pos]
-
-                raw_diffs[idx] = v1 - v2
-                idx += 1
-
-        return raw_diffs, blocks_h, blocks_w
+        # 直接展平返回所有块的差值
+        raw_diffs = (v1 - v2).flatten()
+        return raw_diffs, h_trunc // 8, w_trunc // 8

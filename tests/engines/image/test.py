@@ -2,6 +2,9 @@ from engines.image.invisible_watermark import InvisibleWatermarkProcessor
 from PIL import Image, ImageEnhance
 import cv2
 import numpy as np
+from engines.media.video_invisible_watermark import VideoWatermarker
+from engines.media.audio_invisible_watermark import AudioInvisibleWatermarker
+
 
 class Test:
 
@@ -26,10 +29,27 @@ class Test:
         enhancer = ImageEnhance.Brightness(img)
 
         # 调整亮度
-        adjusted = enhancer.enhance(0.5)
+        adjusted = enhancer.enhance(0.01)
 
         # 保存图片
         adjusted.save("D:/pic/watermarked1.png")
+
+
+    def testCompress(self):
+        """
+            使用 OpenCV 模拟 JPEG 压缩
+            :param quality: 0-100，数值越低压缩越严重。
+                            95: 轻微压缩 (微信原图)
+                            75: 标准压缩 (普通网页)
+                            50: 明显压缩 (朋友圈/缩略图)
+                            10-30: 暴力压缩
+            """
+        quality=5
+
+        img = cv2.imread("D:/pic/watermarked.png" )
+
+        # cv2.IMWRITE_JPEG_QUALITY 控制压缩质量
+        cv2.imwrite("D:/pic/watermarked1.jpg" , img, [int(cv2.IMWRITE_JPEG_QUALITY), quality])
 
 
     def testEmbed(self):
@@ -56,7 +76,7 @@ class Test:
 
         # ========== 提取水印 ==========
         extract_result = processor.extract_watermark(
-            image_path="D:/pic/watermarked2.jpg"  # 带水印的图像
+            image_path="D:/pic/watermarked1.png"  # 带水印的图像
         )
 
         if extract_result.success:
@@ -72,3 +92,32 @@ class Test:
         else:
             print(f"✗ 提取失败: {extract_result.error_message}")
 
+
+
+###############################################
+################测试视频水印#####################
+
+    def test_video_embed(self):
+        input = "D:/video/video1.mp4"
+        output = "D:/video/watermarked.mp4"
+
+        watermarker = VideoWatermarker()
+        watermarker.embed_video_timerange(input, output,self.watermark,0)
+
+
+
+    def test_video_extract(self):
+        input = "D:/video/watermarked.mp4"
+        watermarker = VideoWatermarker()
+        watermarker.extract_from_timerange(input,0,1)
+
+    def test_audio_embed(self):
+        input = "D:/video/audio.wav"
+        output = "D:/video/watermarked.wav"
+        watermarker = AudioInvisibleWatermarker()
+        watermarker.embed_file(input,output,self.watermark)
+
+    def test_audio_extract(self):
+        input = "D:/video/watermarked.wav"
+        watermarker = AudioInvisibleWatermarker()
+        print(watermarker.extract_file(input,64))

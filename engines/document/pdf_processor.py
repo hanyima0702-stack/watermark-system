@@ -212,8 +212,7 @@ class PDFProcessor(DocumentProcessor):
             logger.error(f"Failed to add digital signature to PDF: {e}")
             raise DigitalSignatureError(f"Failed to add digital signature: {e}")
 
-    def extract_invisible_watermark(self, file_path: Path,output_path: Path, page=[1,1],mode = 'img',wm_shape=None) -> Optional[str]:
-        assert wm_shape is not None, 'wm_shape needed'
+    def extract_invisible_watermark(self, file_path: Path,output_path: Path, page=[1,1]) -> Optional[str]:
         try:
             pdf_doc = fitz.open(str(file_path))
 
