@@ -13,6 +13,7 @@ from .evidence_report import EvidenceReport
 from .audit_log import AuditLog
 from .system_config import SystemConfig
 from .key_management import KeyManagement
+from .user_session import UserSession
 
 __all__ = [
     "Base",
@@ -24,5 +25,6 @@ __all__ = [
     "EvidenceReport",
     "AuditLog",
     "SystemConfig",
-    "KeyManagement"
+    "KeyManagement",
+    "UserSession"
 ]

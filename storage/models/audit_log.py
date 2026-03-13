@@ -4,7 +4,6 @@
 """
 
 from sqlalchemy import Column, String, ForeignKey, DateTime, JSON, Text, Index
-from sqlalchemy.dialects.postgresql import INET
 from sqlalchemy.orm import relationship
 from .base import Base
 from datetime import datetime
@@ -21,7 +20,7 @@ class AuditLog(Base):
     action = Column(String(100), nullable=False, index=True)
     resource_type = Column(String(50), nullable=False, index=True)
     resource_id = Column(String(50), index=True)
-    ip_address = Column(INET)
+    ip_address = Column(String(45))  # supports IPv4 and IPv6
     user_agent = Column(Text)
     details = Column(JSON, default=dict)
     timestamp = Column(DateTime(timezone=True), default=datetime.utcnow, nullable=False, index=True)

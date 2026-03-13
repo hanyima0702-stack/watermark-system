@@ -3,7 +3,7 @@
 管理系统用户信息和认证数据
 """
 
-from sqlalchemy import Column, String, Boolean, ARRAY, Text
+from sqlalchemy import Column, String, Boolean, JSON, Text
 from sqlalchemy.orm import relationship
 from .base import Base, TimestampMixin
 
@@ -17,7 +17,7 @@ class User(Base, TimestampMixin):
     username = Column(String(100), nullable=False, unique=True, index=True)
     email = Column(String(255), nullable=False, unique=True, index=True)
     department = Column(String(100))
-    roles = Column(ARRAY(Text), default=list)
+    roles = Column(JSON, default=list)
     password_hash = Column(String(255))
     salt = Column(String(255))
     is_active = Column(Boolean, default=True, index=True)

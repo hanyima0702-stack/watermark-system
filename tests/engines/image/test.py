@@ -4,7 +4,8 @@ import cv2
 import numpy as np
 from engines.media.video_invisible_watermark import VideoWatermarker
 from engines.media.audio_invisible_watermark import AudioInvisibleWatermarker
-
+from pydub import AudioSegment
+import os
 
 class Test:
 
@@ -111,13 +112,38 @@ class Test:
         watermarker = VideoWatermarker()
         watermarker.extract_from_timerange(input,0,1)
 
+
+
+#####################################################################
+##########################################################audio
+
+
     def test_audio_embed(self):
-        input = "D:/video/audio.wav"
-        output = "D:/video/watermarked.wav"
+        input = "D:/video/audio.mp3"
+        output = "D:/video/watermarked.mp3"
         watermarker = AudioInvisibleWatermarker()
         watermarker.embed_file(input,output,self.watermark)
 
     def test_audio_extract(self):
-        input = "D:/video/watermarked.wav"
+        input = "D:/video/watermarked.mp3"
         watermarker = AudioInvisibleWatermarker()
         print(watermarker.extract_file(input,64))
+
+
+
+    def test_cut_audio(self):
+        input = "D:/video/watermarked.wav"
+        output_file="D:/video/watermarked1.wav"
+        audio = AudioSegment.from_file(input)
+        start_time=0
+        end_time=100000
+
+        # 截取音频片段
+        cut_audio = audio[start_time:end_time]
+
+        # 导出截取后的音频
+        cut_audio.export(output_file, format=output_file.split('.')[-1])
+
+        print(f"截取成功！文件已保存至: {output_file}")
+        print(f"原始时长: {len(audio) / 1000:.2f}秒")
+        print(f"截取时长: {len(cut_audio) / 1000:.2f}秒")

@@ -6,7 +6,9 @@ import numpy as np
 from pathlib import Path
 from typing import Optional, Tuple, Union
 import logging
-from scipy.io import wavfile
+from pydub import AudioSegment
+import numpy as np
+from pathlib import Path
 from scipy import signal
 import warnings
 
@@ -19,7 +21,7 @@ class AudioInvisibleWatermarkConfig:
     def __init__(
         self,
         method: str = 'echo_hiding',
-        strength: float = 0.5,
+        strength: float = 1.0,
         echo_delay: int = 100,
         echo_decay: float = 0.5,
         sample_rate: int = 44100,
@@ -441,124 +443,114 @@ class AudioInvisibleWatermarker:
             )
         else:
             raise ValueError(f"Unknown method: {self.config.method}")
-    
+
+    def _read_audio(self, file_path: Union[str, Path]) -> Tuple[int, np.ndarray]:
+        """通用的音频读取方法，支持各种格式"""
+        # pydub 会自动根据文件头识别格式（MP3, FLAC, M4A, WAV等）
+        audio_seg = AudioSegment.from_file(str(file_path))
+        sample_rate = audio_seg.frame_rate
+
+        # 转换为 numpy 数组
+        samples = np.array(audio_seg.get_array_of_samples())
+
+        # 处理立体声
+        if audio_seg.channels == 2:
+            samples = samples.reshape((-1, 2))
+
+        # 归一化到 [-1.0, 1.0] 的浮点数
+        # sample_width 是字节数，比如 16-bit 音频的 width 是 2
+        max_val = float(1 << (8 * audio_seg.sample_width - 1))
+        audio_np = samples.astype(np.float32) / max_val
+
+        return sample_rate, audio_np
+
+    def _write_audio(self, audio_np: np.ndarray, sample_rate: int, file_path: Union[str, Path]):
+        """通用的音频写入方法，根据后缀名自动导出格式"""
+        # 将归一化的浮点数转换回 16-bit 整数
+        audio_int16 = np.clip(audio_np * 32767, -32768, 32767).astype(np.int16)
+        channels = 1 if len(audio_int16.shape) == 1 else 2
+
+        # 将 numpy 数组塞回 pydub 的 AudioSegment
+        watermarked_seg = AudioSegment(
+            audio_int16.tobytes(),
+            frame_rate=sample_rate,
+            sample_width=2,  # 固定导出为 16-bit 深度
+            channels=channels
+        )
+
+        # 获取目标文件的后缀名（比如 'mp3', 'flac'），去掉点号
+        ext = Path(file_path).suffix.lower().lstrip('.')
+        if not ext:
+            ext = 'wav'
+
+        # 导出文件
+        # 注意：导出 mp3 等有损格式可能会削弱水印信号
+        watermarked_seg.export(str(file_path), format=ext)
+
     def embed_file(
-        self,
-        input_path: Union[str, Path],
-        output_path: Union[str, Path],
-        watermark_data: str
+            self,
+            input_path: Union[str, Path],
+            output_path: Union[str, Path],
+            watermark_data: str
     ) -> bool:
-        """
-        在音频文件中嵌入水印
-        
-        Args:
-            input_path: 输入音频文件路径
-            output_path: 输出音频文件路径
-            watermark_data: 水印数据（字符串）
-            
-        Returns:
-            是否成功
-        """
+        """在音频文件中嵌入水印（纯比特流模式）"""
         try:
-            # 读取音频文件
-            sample_rate, audio = wavfile.read(str(input_path))
-            
-            # 归一化到[-1, 1]
-            if audio.dtype == np.int16:
-                audio = audio.astype(np.float32) / 32768.0
-            elif audio.dtype == np.int32:
-                audio = audio.astype(np.float32) / 2147483648.0
-            
-            # 转换水印数据为比特
-            watermark_bits = np.array(list(watermark_data), dtype=np.uint8)
-            
-            # 嵌入水印
+            # 1. 读取音频 (保持之前的混合读取逻辑)
+            sample_rate, audio = self._read_audio(input_path)
+
+            # 2. 【核心修改】直接将 "1010" 字符串转为数字数组 [1, 0, 1, 0]
+            # 过滤掉可能存在的非 0/1 字符，确保纯净
+            clean_bits = [int(b) for b in watermark_data if b in ('0', '1')]
+            watermark_bits = np.array(clean_bits, dtype=np.uint8)
+
+            if len(watermark_bits) == 0:
+                raise ValueError("Watermark data must contain 0s and 1s.")
+
+            # 3. 嵌入水印
             watermarked = self.processor.embed(audio, watermark_bits, sample_rate)
-            
-            # 转换回整数格式
-            watermarked_int = (watermarked * 32767).astype(np.int16)
-            
-            # 保存
-            wavfile.write(str(output_path), sample_rate, watermarked_int)
-            
-            logger.info(f"Successfully embedded watermark in {output_path}")
+
+            # 4. 导出音频 (保持之前的混合写入逻辑)
+            self._write_audio(watermarked, sample_rate, output_path)
+
+            logger.info(f"Successfully embedded {len(watermark_bits)} bits of watermark in {output_path}")
             return True
-            
+
         except Exception as e:
             logger.error(f"Failed to embed watermark: {e}")
             return False
-    
-    def extract_file(
-        self,
-        input_path: Union[str, Path],
-        watermark_length: Optional[int] = None
-    ) -> Tuple[Optional[str], float]:
-        """
-        从音频文件中提取水印
-        
-        Args:
-            input_path: 输入音频文件路径
-            watermark_length: 水印长度（字符数），如果为None则尝试自动检测
-            
-        Returns:
-            (watermark_data, confidence): 提取的水印数据和平均置信度
-        """
-        try:
-            # 读取音频文件
-            sample_rate, audio = wavfile.read(str(input_path))
-            
-            # 归一化
-            if audio.dtype == np.int16:
-                audio = audio.astype(np.float32) / 32768.0
-            elif audio.dtype == np.int32:
-                audio = audio.astype(np.float32) / 2147483648.0
-            
-            # 如果未指定长度，使用默认值
-            if watermark_length is None:
-                watermark_length = 64  # 默认16个字符 = 128比特
-            
 
-            # 提取水印
+    def extract_file(
+            self,
+            input_path: Union[str, Path],
+            watermark_length: Optional[int] = None
+    ) -> Tuple[Optional[str], float]:
+        """从音频文件中提取水印（纯比特流模式）"""
+        try:
+            # 1. 读取音频
+            sample_rate, audio = self._read_audio(input_path)
+
+            # 如果未指定长度，使用默认比特数
+            if watermark_length is None:
+                watermark_length = 64
+
+                # 2. 提取水印比特
             extracted_bits, confidence_array = self.processor.extract(
                 audio, watermark_length, sample_rate
             )
-            
 
+            # 3. 【核心修改】将 [1, 0, 1, 0] 数组直接拼回 "1010" 字符串，跳过 ASCII 转换
+            extracted_string = "".join(str(int(bit)) for bit in extracted_bits)
             avg_confidence = np.mean(confidence_array)
-            
+
             logger.info(f"Extracted watermark with confidence {avg_confidence:.2f}")
-            return extracted_bits, float(avg_confidence)
-            
+            return extracted_string, float(avg_confidence)
+
         except Exception as e:
             logger.error(f"Failed to extract watermark: {e}")
             return None, 0.0
     
-    def _string_to_bits(self, text: str) -> np.ndarray:
-        """将字符串转换为比特序列"""
-        bits = []
-        for char in text:
-            byte_val = ord(char)
-            for i in range(8):
-                bits.append((byte_val >> (7 - i)) & 1)
-        return np.array(bits, dtype=int)
-    
-    def _bits_to_string(self, bits: np.ndarray) -> str:
-        """将比特序列转换为字符串"""
-        chars = []
-        for i in range(0, len(bits), 8):
-            if i + 8 <= len(bits):
-                byte_bits = bits[i:i+8]
-                byte_val = 0
-                for j, bit in enumerate(byte_bits):
-                    byte_val |= (int(bit) << (7 - j))
-                
-                # 只添加可打印字符
-                if 32 <= byte_val <= 126:
-                    chars.append(chr(byte_val))
-                else:
-                    chars.append('?')
-        
-        return ''.join(chars)
+
+
     
     def measure_quality(
         self,
@@ -576,9 +568,9 @@ class AudioInvisibleWatermarker:
             质量指标字典
         """
         try:
-            # 读取音频
-            sr1, audio1 = wavfile.read(str(original_path))
-            sr2, audio2 = wavfile.read(str(watermarked_path))
+            # 使用新的通用读取方法
+            sr1, audio1 = self._read_audio(original_path)
+            sr2, audio2 = self._read_audio(watermarked_path)
             
             if sr1 != sr2:
                 raise ValueError("Sample rates don't match")

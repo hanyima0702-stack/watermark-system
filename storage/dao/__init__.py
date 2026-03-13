@@ -13,6 +13,7 @@ from .evidence_report_dao import EvidenceReportDAO
 from .audit_log_dao import AuditLogDAO
 from .system_config_dao import SystemConfigDAO
 from .key_management_dao import KeyManagementDAO
+from .user_session_dao import UserSessionDAO
 
 __all__ = [
     "BaseDAO",
@@ -24,5 +25,6 @@ __all__ = [
     "EvidenceReportDAO",
     "AuditLogDAO",
     "SystemConfigDAO",
-    "KeyManagementDAO"
+    "KeyManagementDAO",
+    "UserSessionDAO"
 ]

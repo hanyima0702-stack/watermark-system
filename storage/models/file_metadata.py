@@ -21,12 +21,17 @@ class FileMetadata(Base):
     file_size = Column(BigInteger, nullable=False)
     storage_path = Column(String(500), nullable=False)
     uploaded_by = Column(String(50), ForeignKey('users.user_id'), nullable=False, index=True)
-    metadata = Column(JSON, default=dict)
+    extra_metadata = Column('metadata', JSON, default=dict)
     uploaded_at = Column(DateTime(timezone=True), default=datetime.utcnow, nullable=False, index=True)
     
     # 关系定义
     uploader = relationship("User", back_populates="uploaded_files")
-    watermark_tasks = relationship("WatermarkTask", back_populates="file", cascade="all, delete-orphan")
+    watermark_tasks = relationship(
+        "WatermarkTask",
+        back_populates="file",
+        foreign_keys="WatermarkTask.file_id",
+        cascade="all, delete-orphan"
+    )
     extraction_results = relationship("ExtractionResult", back_populates="file", cascade="all, delete-orphan")
     
     # 复合索引
@@ -83,10 +88,10 @@ class FileMetadata(Base):
     
     def add_metadata(self, key: str, value):
         """添加元数据"""
-        if not self.metadata:
-            self.metadata = {}
-        self.metadata[key] = value
+        if not self.extra_metadata:
+            self.extra_metadata = {}
+        self.extra_metadata[key] = value
     
     def get_metadata(self, key: str, default=None):
         """获取元数据"""
-        return (self.metadata or {}).get(key, default)
+        return (self.extra_metadata or {}).get(key, default)

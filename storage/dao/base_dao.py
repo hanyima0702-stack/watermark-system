@@ -128,11 +128,17 @@ class BaseDAO(Generic[T], ABC):
         """更新对象"""
         try:
             async with self.get_session() as session:
+                pk = self._get_primary_key()
                 query = update(self.model_class).where(
-                    getattr(self.model_class, self._get_primary_key()) == obj_id
-                ).values(**update_data).returning(self.model_class)
-                
-                result = await session.execute(query)
+                    getattr(self.model_class, pk) == obj_id
+                ).values(**update_data)
+                await session.execute(query)
+
+                # MySQL doesn't support RETURNING, so fetch the updated row separately
+                select_query = select(self.model_class).where(
+                    getattr(self.model_class, pk) == obj_id
+                )
+                result = await session.execute(select_query)
                 return result.scalar_one_or_none()
         except SQLAlchemyError as e:
             logger.error(f"更新{self.model_class.__name__}失败: {e}")

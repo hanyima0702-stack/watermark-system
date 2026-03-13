@@ -5,16 +5,44 @@
 
 import os
 from typing import List, Optional, Dict, Any
-from pydantic import BaseSettings, validator
+from pydantic_settings import BaseSettings
+from pydantic import validator
 from functools import lru_cache
 
 
 class DatabaseConfig(BaseSettings):
     """数据库配置"""
-    url: str = "postgresql://watermark_user:watermark_pass@localhost:5432/watermark_system"
+    # 支持PostgreSQL和MySQL
+    db_type: str = "mysql"  # "postgresql" or "mysql"
+    host: str = "localhost"
+    port: int = 3306
+    user: str = "root"
+    password: str = "xmy123456"
+    database: str = "watermark_system"
+    charset: str = "utf8mb4"
+    
+    # 连接池配置
     pool_size: int = 20
     max_overflow: int = 30
     echo: bool = False
+    
+    # 兼容旧的URL配置
+    url: Optional[str] = None
+    
+    @property
+    def connection_url(self) -> str:
+        """生成数据库连接URL"""
+        if self.url:
+            return self.url
+        
+        if self.db_type == "mysql":
+            # MySQL异步连接URL
+            return f"mysql+aiomysql://{self.user}:{self.password}@{self.host}:{self.port}/{self.database}?charset={self.charset}"
+        elif self.db_type == "postgresql":
+            # PostgreSQL异步连接URL
+            return f"postgresql+asyncpg://{self.user}:{self.password}@{self.host}:{self.port}/{self.database}"
+        else:
+            raise ValueError(f"不支持的数据库类型: {self.db_type}")
     
     class Config:
         env_prefix = "DATABASE_"
@@ -53,14 +81,42 @@ class MessageQueueConfig(BaseSettings):
         env_prefix = "MQ_"
 
 
-class ObjectStorageConfig(BaseSettings):
-    """对象存储配置"""
+class MinIOConfig(BaseSettings):
+    """MinIO对象存储配置"""
     endpoint: str = "localhost:9000"
     access_key: str = "minioadmin"
     secret_key: str = "minioadmin123"
-    bucket_name: str = "watermark-files"
     secure: bool = False
     region: str = "us-east-1"
+    
+    # 各类型文件的bucket配置
+    video_bucket: str = "watermark-videos"
+    document_bucket: str = "watermark-documents"
+    audio_bucket: str = "watermark-audios"
+    image_bucket: str = "watermark-images"
+    result_bucket: str = "watermark-results"
+    
+    class Config:
+        env_prefix = "MINIO_"
+
+
+class ObjectStorageConfig(BaseSettings):
+    """对象存储配置（兼容旧代码）"""
+    endpoint: str = "localhost:9000"
+    access_key: str = "minioadmin"
+    secret_key: str = "minioadmin123"
+    secure: bool = False
+    region: str = "us-east-1"
+    
+    # 各类型文件的bucket配置
+    video_bucket: str = "watermark-videos"
+    document_bucket: str = "watermark-documents"
+    audio_bucket: str = "watermark-audios"
+    image_bucket: str = "watermark-images"
+    result_bucket: str = "watermark-results"
+    
+    # 兼容旧配置
+    bucket_name: Optional[str] = None
     
     class Config:
         env_prefix = "MINIO_"
@@ -208,6 +264,7 @@ class AppConfig(BaseSettings):
     redis: RedisConfig = RedisConfig()
     clickhouse: ClickHouseConfig = ClickHouseConfig()
     message_queue: MessageQueueConfig = MessageQueueConfig()
+    minio: MinIOConfig = MinIOConfig()
     object_storage: ObjectStorageConfig = ObjectStorageConfig()
     security: SecurityConfig = SecurityConfig()
     ldap: LDAPConfig = LDAPConfig()

@@ -14,7 +14,7 @@ from .models import Base, User, SystemConfig
 from .dao import (
     UserDAO, FileMetadataDAO, WatermarkConfigDAO, WatermarkTaskDAO,
     ExtractionResultDAO, EvidenceReportDAO, AuditLogDAO, 
-    SystemConfigDAO, KeyManagementDAO
+    SystemConfigDAO, KeyManagementDAO, UserSessionDAO
 )
 
 logger = logging.getLogger(__name__)
@@ -23,8 +23,10 @@ logger = logging.getLogger(__name__)
 class DatabaseManager:
     """数据库管理器"""
     
-    def __init__(self, database_url: str):
+    def __init__(self, database_url: str, pool_size: int = 20, max_overflow: int = 30):
         self.database_url = database_url
+        self.pool_size = pool_size
+        self.max_overflow = max_overflow
         self.engine = None
         self.async_session = None
         self._daos = {}
@@ -35,8 +37,8 @@ class DatabaseManager:
             self.engine = create_async_engine(
                 self.database_url,
                 echo=False,
-                pool_size=20,
-                max_overflow=30,
+                pool_size=self.pool_size,
+                max_overflow=self.max_overflow,
                 pool_pre_ping=True,
                 pool_recycle=3600
             )
@@ -50,7 +52,7 @@ class DatabaseManager:
             # 初始化DAO对象
             self._init_daos()
             
-            logger.info("数据库连接初始化成功")
+            logger.info(f"数据库连接初始化成功: {self.database_url.split('@')[-1] if '@' in self.database_url else self.database_url}")
             
         except Exception as e:
             logger.error(f"数据库连接初始化失败: {e}")
@@ -67,7 +69,8 @@ class DatabaseManager:
             'evidence_report': EvidenceReportDAO(self),
             'audit_log': AuditLogDAO(self),
             'system_config': SystemConfigDAO(self),
-            'key_management': KeyManagementDAO(self)
+            'key_management': KeyManagementDAO(self),
+            'user_session': UserSessionDAO(self)
         }
     
     @asynccontextmanager
@@ -174,7 +177,8 @@ class DatabaseManager:
         """数据库健康检查"""
         try:
             async with self.get_session() as session:
-                await session.execute("SELECT 1")
+                from sqlalchemy import text
+                await session.execute(text("SELECT 1"))
             return True
         except Exception as e:
             logger.error(f"数据库健康检查失败: {e}")
@@ -275,7 +279,10 @@ async def setup_database(database_url: str, create_tables: bool = True, init_dat
 if __name__ == "__main__":
     # 测试脚本
     async def main():
-        database_url = "postgresql+asyncpg://watermark_user:watermark_pass@localhost:5432/watermark_system"
+        # 从配置获取数据库URL
+        from shared.config import get_settings
+        settings = get_settings()
+        database_url = settings.database.connection_url
         
         try:
             db = await setup_database(database_url)
