@@ -17,26 +17,33 @@ class InvisibleWatermarkProcessor:
         self.ecc_encoder = ECCEncoder(n=self.config.ecc_n, k=self.config.ecc_k)
         self.scrambler = Scrambler(seed=self.config.scramble_seed)
         self.modulator = DCTModulator(strength=self.config.modulation_strength)
+        self.image = None
 
         # 核心修改 3：必须与嵌入端保持一致，改为 5 阶
         self.m_gen = MSequenceGenerator(degree=5)
         self.image_embedder = ImageEmbedder(modulator=self.modulator, watermarkConfig=self.config)
+    def read_image(self,image: np.ndarray):
+        try:
+            self.image = image
+        except Exception as e:
+            print("图片读取失败")
 
-    def embed_watermark(self, image_path: str, watermark: str, output_path: str) -> EmbedResult:
+    def embed_watermark(self, watermark: str, output_path: str,image_path: str =None ) -> EmbedResult:
         # 嵌入代码保持不变，请直接使用上一个版本的 embed_watermark
         # 重点在于使用新的 DCTModulator (低频)
         start_time = time.time()
         try:
-            image = cv2.imread(image_path)
-            if image is None: raise ValueError("Image not found")
+            if image_path is not None:
+                self.image = cv2.imread(image_path)
+            if self.image is None: raise ValueError("Image not found")
             encoded_bits = self.ecc_encoder.encode(watermark)
             scrambled_bits = self.scrambler.scramble(encoded_bits)
-            watermarked_img = self.image_embedder.embed(image, scrambled_bits)
+            watermarked_img = self.image_embedder.embed(self.image, scrambled_bits)
             cv2.imwrite(output_path, watermarked_img)
             return EmbedResult(
                 success=True, watermark_data=watermark, encoded_data="",
                 block_count=(0, 0), processing_time=time.time() - start_time,
-                image_size=image.shape[:2]
+                image_size=self.image.shape[:2]
             )
         except Exception as e:
             return EmbedResult(success=False, error_message=str(e), watermark_data="", encoded_data="",
@@ -193,18 +200,18 @@ class InvisibleWatermarkProcessor:
 
         return corrected_image, best_angle, best_correlation
 
-    def extract_watermark(self, image_path: str) -> ExtractionResult:
+    def extract_watermark(self, image_path: str = None) -> ExtractionResult:
         """
         极速抗攻击提取：互相关定向 + 分辨率扫描
         已去除低效的暴力角度扫描。
         """
         start_time = time.time()
-        image = cv2.imread(image_path)
-        if image is None: return ExtractionResult(success=False, error_message="Image not found")
+        self.image = cv2.imread(image_path)
+        if self.image is None: return ExtractionResult(success=False, error_message="Image not found")
 
         # === 1. 新增步骤：利用 m-序列互相关快速纠正 90/180/270 度旋转 ===
         # 这一步极快，并且能有效抵抗摩尔纹干扰
-        img_oriented, detected_angle, corr_score = self._get_exact_angle_using_cross_correlation(image)
+        img_oriented, detected_angle, corr_score = self._get_exact_angle_using_cross_correlation(self.image)
 
         rot_h, rot_w = img_oriented.shape[:2]
 

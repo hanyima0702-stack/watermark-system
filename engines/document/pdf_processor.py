@@ -23,7 +23,7 @@ from .base_processor import DocumentProcessor, WatermarkConfig, DocumentProcessi
 from .base_processor import WatermarkEmbeddingError, DigitalSignatureError
 from ..extraction.report_generator import WatermarkReportGenerator, ExtractionResult
 import numpy as np
-from ..image.image_processor import ImageProcessor
+from ..image.invisible_watermark import InvisibleWatermarkProcessor
 
 
 logger = logging.getLogger(__name__)
@@ -41,7 +41,7 @@ class PDFProcessor(DocumentProcessor):
         self.supported_formats = ['.pdf']
         
         # 初始化水印处理器
-        self.imageProcessor = ImageProcessor()
+        self.imageProcessor = InvisibleWatermarkProcessor()
 
 
 
@@ -119,15 +119,11 @@ class PDFProcessor(DocumentProcessor):
                 img_array = cv2.cvtColor(img_array, cv2.COLOR_RGB2BGR)
 
                 #读取原图片
-                self.imageProcessor.bwm_core.read_img_arr(img=img_array)
-
-                #读取水印
-
-                self.imageProcessor.read_wm(watermark_data,mode=mode)
+                self.imageProcessor.read_image(img_array)
 
                 #嵌入水印
 
-                embed_img =self.imageProcessor.embed()
+                embed_img =self.imageProcessor.embed_watermark()
 
 
                 # 将含水印的图像转换回PDF页面
@@ -229,11 +225,13 @@ class PDFProcessor(DocumentProcessor):
                 img_data = np.frombuffer(pix.samples, dtype=np.uint8)
                 img_array = img_data.reshape(pix.height, pix.width, pix.n)
 
+                self.imageProcessor.read_image(img_array)
+
                 #颜色空间转换 RGB -> BGR
                 # if uint8_img.shape[2] == 3:  # 确保是彩色图片
                 uint8_img = cv2.cvtColor(img_array, cv2.COLOR_RGB2BGR)
 
-                self.imageProcessor.extract(embed_img=uint8_img,wm_shape=wm_shape,out_wm_name=output_path/f'page{i}.png')
+                self.imageProcessor.extract_watermark()
 
 
             pdf_doc.close()
