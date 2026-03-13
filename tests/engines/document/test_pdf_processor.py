@@ -29,7 +29,7 @@ class TestPDFProcessor:
 
     @pytest.fixture
     def watermark(self):
-        return "D:/pic/watermark_pic.png"
+        return "1010101010101010101010101010101010101010101010101010101010101010"
     
     @pytest.fixture
     def sample_watermark_config(self):

@@ -87,9 +87,7 @@ class PDFProcessor(DocumentProcessor):
             logger.error(f"Failed to add visible watermark to PDF: {e}")
             raise WatermarkEmbeddingError(f"Failed to add visible watermark: {e}")
 
-    def add_invisible_watermark(self, file_path: Path, watermark_data: str , mode = "img") -> Path:
-        """Add invisible watermark to PDF using selected method."""
-        assert mode in ('img', 'str', 'bit'), "mode in ('img','str','bit')"
+    def add_invisible_watermark(self, file_path: Path, watermark_data: str) -> Path:
 
         if not self.is_supported_format(file_path):
             raise DocumentProcessingError(f"Unsupported format: {file_path.suffix}")
