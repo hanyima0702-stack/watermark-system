@@ -63,7 +63,8 @@ class EmbedResult:
     processing_time: float       # 处理耗时 (秒)
     image_size: tuple            # 图像尺寸 (height, width)
     error_message: Optional[str] = None
-    quality_metrics: Dict[str, float] = field(default_factory=dict) # PSNR, SSIM
+    quality_metrics: Dict[str, float] = field(default_factory=dict)  # PSNR, SSIM
+    minio_object_key: Optional[str] = None   # MinIO中的对象键
 
 @dataclass
 class ExtractionResult:

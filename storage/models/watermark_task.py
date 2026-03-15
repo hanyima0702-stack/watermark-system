@@ -18,7 +18,7 @@ class WatermarkTask(Base, TimestampMixin):
     task_id = Column(String(50), primary_key=True)
     user_id = Column(String(50), ForeignKey('users.user_id'), nullable=False, index=True)
     file_id = Column(String(50), ForeignKey('file_metadata.file_id'), nullable=False, index=True)
-    config_id = Column(String(50), ForeignKey('watermark_configs.config_id'), nullable=False)
+    config_id = Column(String(50), ForeignKey('watermark_configs.config_id'), nullable=True)
     task_type = Column(String(50), nullable=False, index=True)
     status = Column(String(20), nullable=False, default='pending', index=True)
     progress = Column(DECIMAL(5, 2), default=0.00)

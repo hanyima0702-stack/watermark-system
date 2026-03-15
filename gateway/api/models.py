@@ -27,11 +27,27 @@ class TaskStatus(str, Enum):
 
 # ============= 请求模型 =============
 
+class VisibleWatermarkOptions(BaseModel):
+    """明水印详细配置"""
+    text: str = Field(..., description="水印文字内容")
+    font_size: int = Field(default=36, description="字体大小")
+    color: str = Field(default="#FF0000", description="颜色 hex")
+    opacity: float = Field(default=0.4, ge=0.0, le=1.0, description="透明度")
+    rotation: float = Field(default=45.0, description="旋转角度")
+    tiled: bool = Field(default=True, description="是否平铺")
+    spacing_x: int = Field(default=100, description="平铺水平间距")
+    spacing_y: int = Field(default=100, description="平铺垂直间距")
+    position: str = Field(default="center", description="位置: center/top-left/top-right/bottom-left/bottom-right")
+
+
 class WatermarkTaskRequest(BaseModel):
     """水印任务请求"""
     file_id: str = Field(..., description="文件ID")
-    config_id: str = Field(..., description="配置ID")
+    config_id: str = Field(default="default", description="配置ID")
     watermark_type: WatermarkType = Field(default=WatermarkType.BOTH, description="水印类型")
+    visible_text: Optional[str] = Field(None, description="明水印文字内容（简单模式）")
+    visible_config: Optional[VisibleWatermarkOptions] = Field(None, description="明水印详细配置")
+    invisible_text: Optional[str] = Field(None, description="暗水印备注信息")
     priority: int = Field(default=0, description="任务优先级")
     callback_url: Optional[str] = Field(None, description="回调URL")
 
@@ -69,6 +85,8 @@ class WatermarkTaskResponse(BaseModel):
     status: TaskStatus
     created_at: datetime
     message: str
+    minio_object_key: Optional[str] = None
+    watermark_bits: Optional[str] = None  # 系统生成的64位bit串
 
 
 class TaskStatusResponse(BaseModel):

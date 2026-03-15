@@ -449,7 +449,7 @@ class FileService:
                         file_size=file_size,
                         storage_path=f"minio://{bucket_name}/{object_key}",
                         uploaded_by=user_id,
-                        metadata={
+                        extra_metadata={
                             'minio_bucket': bucket_name,
                             'minio_object_key': object_key,
                             'minio_etag': minio_result.get('etag'),

@@ -11,7 +11,7 @@ from io import BytesIO
 import aiohttp
 
 from minio import Minio
-from minio.error import S3Error, BucketAlreadyOwnedByYou, BucketAlreadyExists
+from minio.error import S3Error
 from urllib3.exceptions import MaxRetryError
 
 from .base_storage import BaseStorageService, StorageObject, UploadResult
@@ -26,7 +26,7 @@ class MinIOStorageService(BaseStorageService):
         super().__init__(config)
         self.endpoint = config.get('endpoint', 'localhost:9000')
         self.access_key = config.get('access_key', 'minioadmin')
-        self.secret_key = config.get('secret_key', 'minioadmin123')
+        self.secret_key = config.get('secret_key', 'minioadmin')
         self.secure = config.get('secure', False)
         self.region = config.get('region', 'us-east-1')
         self.default_bucket = config.get('default_bucket', 'watermark-files')
@@ -77,12 +77,16 @@ class MinIOStorageService(BaseStorageService):
             logger.info(f"存储桶创建成功: {bucket_name}")
             return True
             
-        except (BucketAlreadyOwnedByYou, BucketAlreadyExists):
-            logger.info(f"存储桶已存在: {bucket_name}")
-            return True
-        except S3Error as e:
-            logger.error(f"创建存储桶失败: {e}")
-            return False
+        except (S3Error) as err:
+            if err.code == "BucketAlreadyOwnedByYou":
+                logger.log("Bucket already owned by you")
+                return True
+            elif err.code == "BucketAlreadyExists":
+                logger.log("Bucket already exists")
+                return True
+            else:
+                logger.error(f"创建存储桶失败: {err}")
+                return False
     
     async def bucket_exists(self, bucket_name: str) -> bool:
         """检查存储桶是否存在"""

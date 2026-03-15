@@ -5,6 +5,7 @@
 import numpy as np
 from pathlib import Path
 from typing import Optional, Tuple, Union
+import io
 import logging
 from pydub import AudioSegment
 import numpy as np
@@ -490,34 +491,95 @@ class AudioInvisibleWatermarker:
     def embed_file(
             self,
             input_path: Union[str, Path],
-            output_path: Union[str, Path],
             watermark_data: str
-    ) -> bool:
-        """在音频文件中嵌入水印（纯比特流模式）"""
+    ) -> bytes:
+        """
+        在音频文件中嵌入暗水印，返回含水印的音频 bytes，不涉及存储。
+
+        Args:
+            input_path:     原始音频路径
+            watermark_data: 水印比特字符串（如 "10110..."）
+
+        Returns:
+            含水印的音频 bytes
+        """
+        sample_rate, audio = self._read_audio(input_path)
+
+        clean_bits = [int(b) for b in watermark_data if b in ('0', '1')]
+        watermark_bits = np.array(clean_bits, dtype=np.uint8)
+        if len(watermark_bits) == 0:
+            raise ValueError("Watermark data must contain 0s and 1s.")
+
+        watermarked = self.processor.embed(audio, watermark_bits, sample_rate)
+
+        # 序列化为 bytes（使用原始格式）
+        audio_int16 = np.clip(watermarked * 32767, -32768, 32767).astype(np.int16)
+        channels = 1 if len(audio_int16.shape) == 1 else 2
+        from pydub import AudioSegment
+        seg = AudioSegment(
+            audio_int16.tobytes(),
+            frame_rate=sample_rate,
+            sample_width=2,
+            channels=channels,
+        )
+        ext = Path(input_path).suffix.lower().lstrip('.') or 'wav'
+        buf = io.BytesIO()
+        seg.export(buf, format=ext)
+        logger.info(f"音频暗水印嵌入完毕，{len(watermark_bits)} bits")
+        return buf.getvalue()
+
+    async def process_watermark(
+            self,
+            input_path: Union[str, Path],
+            minio_service,
+            invisible_watermark: str = None,
+            object_key: str = None,
+            bucket_name: str = None,
+    ) -> dict:
+        """
+        上层方法：嵌入暗水印后上传 MinIO。
+        （音频暂无明水印，预留扩展）
+
+        Args:
+            input_path:          原始音频路径
+            minio_service:       MinIOService 实例
+            invisible_watermark: 暗水印比特字符串，None 则直接上传原文件
+            object_key:          MinIO 对象键，不传则自动生成
+            bucket_name:         目标 bucket，不传则使用 result_bucket
+
+        Returns:
+            dict，包含 success、minio_object_key 等字段
+        """
+        import time, uuid
+        start_time = time.time()
         try:
-            # 1. 读取音频 (保持之前的混合读取逻辑)
-            sample_rate, audio = self._read_audio(input_path)
+            ext = Path(input_path).suffix.lower().lstrip('.') or 'wav'
 
-            # 2. 【核心修改】直接将 "1010" 字符串转为数字数组 [1, 0, 1, 0]
-            # 过滤掉可能存在的非 0/1 字符，确保纯净
-            clean_bits = [int(b) for b in watermark_data if b in ('0', '1')]
-            watermark_bits = np.array(clean_bits, dtype=np.uint8)
+            if invisible_watermark:
+                audio_bytes = self.embed_file(input_path, invisible_watermark)
+            else:
+                with open(input_path, 'rb') as f:
+                    audio_bytes = f.read()
 
-            if len(watermark_bits) == 0:
-                raise ValueError("Watermark data must contain 0s and 1s.")
+            target_bucket = bucket_name or minio_service.config.result_bucket
+            target_key = object_key or f"watermarked/{uuid.uuid4().hex}.{ext}"
 
-            # 3. 嵌入水印
-            watermarked = self.processor.embed(audio, watermark_bits, sample_rate)
+            await minio_service.upload_file(
+                bucket_name=target_bucket,
+                object_key=target_key,
+                file_data=audio_bytes,
+                content_type=f"audio/{ext}",
+                metadata={"watermark": invisible_watermark or ""},
+            )
 
-            # 4. 导出音频 (保持之前的混合写入逻辑)
-            self._write_audio(watermarked, sample_rate, output_path)
-
-            logger.info(f"Successfully embedded {len(watermark_bits)} bits of watermark in {output_path}")
-            return True
-
+            return {
+                "success": True,
+                "minio_object_key": f"{target_bucket}/{target_key}",
+                "processing_time": time.time() - start_time,
+            }
         except Exception as e:
-            logger.error(f"Failed to embed watermark: {e}")
-            return False
+            logger.error(f"音频水印处理失败: {e}")
+            return {"success": False, "error": str(e)}
 
     def extract_file(
             self,

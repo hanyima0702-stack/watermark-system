@@ -243,6 +243,10 @@ class VideoVisibleWatermarkProcessor:
         font_size: int = 24,
         font_color: str = "white",
         opacity: float = 0.5,
+        rotation: float = 0,
+        tiled: bool = False,
+        tile_gap_x: int = 120,
+        tile_gap_y: int = 80,
         start_time: Optional[float] = None,
         end_time: Optional[float] = None,
         video_codec: str = 'libx264',
@@ -272,10 +276,20 @@ class VideoVisibleWatermarkProcessor:
             是否成功
         """
         try:
-            # 构建drawtext滤镜
+            if tiled:
+                # 平铺模式：先生成水印图片，再用 overlay 叠加
+                return self._add_tiled_text_watermark(
+                    input_video, output_video, text,
+                    font_size, font_color, opacity, rotation,
+                    tile_gap_x, tile_gap_y,
+                    start_time, end_time,
+                    video_codec, audio_codec, crf, preset,
+                )
+
+            # 单个水印：用 drawtext
             filter_str = self._build_drawtext_filter(
                 text, position, font_size, font_color, opacity,
-                start_time, end_time
+                start_time, end_time,
             )
             
             cmd = [
@@ -317,14 +331,23 @@ class VideoVisibleWatermarkProcessor:
         font_color: str,
         opacity: float,
         start_time: Optional[float],
-        end_time: Optional[float]
+        end_time: Optional[float],
     ) -> str:
-        """构建drawtext滤镜"""
-        # 转义特殊字符
-        text = text.replace(":", r"\:")
-        text = text.replace("'", r"\'")
-        
-        # 位置映射
+        """构建单个 drawtext 滤镜"""
+        escaped_text = text.replace(":", r"\:").replace("'", r"\'")
+
+        font_file = None
+        for fp in [
+            "C:/Windows/Fonts/msyh.ttc",
+            "C:/Windows/Fonts/simsun.ttc",
+            "C:/Windows/Fonts/simhei.ttf",
+            "/System/Library/Fonts/PingFang.ttc",
+            "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
+        ]:
+            if os.path.exists(fp):
+                font_file = fp.replace(":", r"\:")
+                break
+
         position_map = {
             'top-left': 'x=10:y=10',
             'top-right': 'x=w-tw-10:y=10',
@@ -332,27 +355,146 @@ class VideoVisibleWatermarkProcessor:
             'bottom-right': 'x=w-tw-10:y=h-th-10',
             'center': 'x=(w-tw)/2:y=(h-th)/2'
         }
-        
-        pos_expr = position_map.get(position, position_map['top-right'])
-        
-        # 构建滤镜
-        filter_parts = [
-            f"drawtext=text='{text}'",
-            f"fontsize={font_size}",
-            f"fontcolor={font_color}@{opacity}",
-            pos_expr
-        ]
-        
-        # 添加时间范围
+        pos_expr = position_map.get(position, position_map['center'])
+
+        parts = [f"drawtext=text='{escaped_text}'"]
+        if font_file:
+            parts.append(f"fontfile='{font_file}'")
+        parts.extend([f"fontsize={font_size}", f"fontcolor={font_color}@{opacity}", pos_expr])
+
         if start_time is not None or end_time is not None:
-            enable_conditions = []
+            conds = []
             if start_time is not None:
-                enable_conditions.append(f"gte(t,{start_time})")
+                conds.append(f"gte(t,{start_time})")
             if end_time is not None:
-                enable_conditions.append(f"lte(t,{end_time})")
-            
-            if enable_conditions:
-                enable_expr = "*".join(enable_conditions)
-                filter_parts.append(f"enable='{enable_expr}'")
-        
-        return ":".join(filter_parts)
+                conds.append(f"lte(t,{end_time})")
+            parts.append(f"enable='{'*'.join(conds)}'")
+
+        return ":".join(parts)
+
+    def _add_tiled_text_watermark(
+        self,
+        input_video: str,
+        output_video: str,
+        text: str,
+        font_size: int,
+        font_color: str,
+        opacity: float,
+        rotation: float,
+        tile_gap_x: int,
+        tile_gap_y: int,
+        start_time: Optional[float],
+        end_time: Optional[float],
+        video_codec: str,
+        audio_codec: str,
+        crf: int,
+        preset: str,
+    ) -> bool:
+        """用 PIL 生成平铺水印图片，再用 FFmpeg overlay 叠加到视频"""
+        import json
+        import tempfile
+        from PIL import Image, ImageDraw, ImageFont
+        import math
+
+        # 1. 获取视频分辨率
+        probe_cmd = [
+            'ffprobe', '-v', 'quiet', '-print_format', 'json',
+            '-show_streams', '-select_streams', 'v:0', input_video
+        ]
+        probe_result = subprocess.run(probe_cmd, capture_output=True, text=True, check=True)
+        streams = json.loads(probe_result.stdout).get('streams', [])
+        if not streams:
+            raise RuntimeError("Cannot detect video resolution")
+        vid_w = int(streams[0]['width'])
+        vid_h = int(streams[0]['height'])
+
+        # 2. 加载中文字体
+        font = None
+        for fp in [
+            "C:/Windows/Fonts/msyh.ttc",
+            "C:/Windows/Fonts/simsun.ttc",
+            "C:/Windows/Fonts/simhei.ttf",
+            "/System/Library/Fonts/PingFang.ttc",
+            "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
+        ]:
+            if os.path.exists(fp):
+                try:
+                    font = ImageFont.truetype(fp, font_size)
+                    break
+                except Exception:
+                    continue
+        if font is None:
+            font = ImageFont.load_default()
+
+        # 3. 解析颜色
+        r, g, b = 255, 0, 0
+        c = font_color.lstrip('#').lstrip('0x')
+        if len(c) == 6:
+            r, g, b = int(c[0:2], 16), int(c[2:4], 16), int(c[4:6], 16)
+        alpha = int(255 * opacity)
+
+        # 4. 生成平铺水印透明图片
+        # 创建一个比视频大的画布（旋转后裁剪）
+        diag = int(math.sqrt(vid_w ** 2 + vid_h ** 2))
+        canvas = Image.new('RGBA', (diag, diag), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(canvas)
+
+        bbox = draw.textbbox((0, 0), text, font=font)
+        tw = bbox[2] - bbox[0]
+        th = bbox[3] - bbox[1]
+        step_x = tw + tile_gap_x
+        step_y = th + tile_gap_y
+
+        for y in range(0, diag, step_y):
+            for x in range(0, diag, step_x):
+                draw.text((x, y), text, font=font, fill=(r, g, b, alpha))
+
+        # 旋转
+        if rotation != 0:
+            canvas = canvas.rotate(rotation, expand=False, fillcolor=(0, 0, 0, 0))
+
+        # 裁剪到视频尺寸（居中裁剪）
+        cw, ch = canvas.size
+        left = (cw - vid_w) // 2
+        top = (ch - vid_h) // 2
+        canvas = canvas.crop((left, top, left + vid_w, top + vid_h))
+
+        # 5. 保存为临时 PNG
+        tmp_png = tempfile.NamedTemporaryFile(suffix='.png', delete=False)
+        canvas.save(tmp_png.name, 'PNG')
+        tmp_png.close()
+
+        try:
+            # 6. FFmpeg overlay
+            filter_complex = f"[1:v]format=rgba[wm];[0:v][wm]overlay=0:0"
+            if start_time is not None or end_time is not None:
+                conds = []
+                if start_time is not None:
+                    conds.append(f"gte(t,{start_time})")
+                if end_time is not None:
+                    conds.append(f"lte(t,{end_time})")
+                filter_complex += f":enable='{'*'.join(conds)}'"
+
+            cmd = [
+                'ffmpeg',
+                '-i', input_video,
+                '-i', tmp_png.name,
+                '-filter_complex', filter_complex,
+                '-c:v', video_codec,
+                '-crf', str(crf),
+                '-preset', preset,
+                '-c:a', audio_codec,
+                '-y',
+                output_video,
+            ]
+
+            logger.info(f"Running tiled watermark FFmpeg command")
+            subprocess.run(cmd, capture_output=True, text=True, check=True)
+            logger.info(f"Tiled text watermark added to {output_video}")
+            return True
+
+        finally:
+            try:
+                os.unlink(tmp_png.name)
+            except OSError:
+                pass

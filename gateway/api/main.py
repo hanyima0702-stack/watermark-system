@@ -56,15 +56,14 @@ async def lifespan(app: FastAPI):
     
     # Initialize auth service
     try:
-        from storage.database_manager import DatabaseManager
+        from storage.database_manager import DatabaseManager, init_database
         from shared.config import DatabaseConfig
         
         # Create database config
         db_config = DatabaseConfig()
         
-        # Create database manager
-        db_manager = DatabaseManager(db_config.connection_url, pool_size=db_config.pool_size, max_overflow=db_config.max_overflow)
-        await db_manager.initialize()
+        # Initialize global database manager (used by file_service etc.)
+        db_manager = await init_database(db_config.connection_url)
         
         # Create JWT manager
         jwt_manager = JWTManager(
@@ -73,7 +72,7 @@ async def lifespan(app: FastAPI):
             expire_minutes=settings.JWT_EXPIRE_MINUTES
         )
         
-        # Create and initialize auth service
+        # Create and initialize auth service (reuses the same db_manager)
         auth_service = AuthService(db_manager, jwt_manager)
         await auth_service.initialize()
         

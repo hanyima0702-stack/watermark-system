@@ -1,13 +1,18 @@
 import cv2
 import numpy as np
 import time
+import uuid
+import io
 import logging
+from typing import Optional
+from PIL import Image
 from .config import WatermarkConfig, EmbedResult, ExtractionResult
 from .encoding.ecc_encoder import ECCEncoder
 from .encoding.scrambler import Scrambler
 from .embedding.ppm_modulator import DCTModulator
 from .embedding.image_embedder import ImageEmbedder
 from .utils.m_sequence import MSequenceGenerator
+
 logger = logging.getLogger(__name__)
 
 
@@ -28,26 +33,98 @@ class InvisibleWatermarkProcessor:
         except Exception as e:
             print("图片读取失败")
 
-    def embed_watermark(self, watermark: str, output_path: str,image_path: str =None ) -> EmbedResult:
-        # 嵌入代码保持不变，请直接使用上一个版本的 embed_watermark
-        # 重点在于使用新的 DCTModulator (低频)
+    def _embed_to_array(self, watermark: str) -> np.ndarray:
+        """
+        内部方法：嵌入水印并返回图像数组（供 pdf_processor 等内部使用）。
+        调用前需先通过 read_image() 加载图片。
+        """
+        if self.image is None:
+            raise ValueError("Image not loaded. Call read_image() first.")
+        encoded_bits = self.ecc_encoder.encode(watermark)
+        scrambled_bits = self.scrambler.scramble(encoded_bits)
+        return self.image_embedder.embed(self.image, scrambled_bits)
+
+    async def process_watermark(
+        self,
+        image_path: str,
+        minio_service,
+        invisible_watermark: Optional[str] = None,
+        visible_processor=None,
+        visible_layers=None,
+        object_key: str = None,
+        bucket_name: str = None,
+    ) -> EmbedResult:
+        """
+        上层方法：根据参数决定嵌入明/暗水印，最终上传 MinIO。
+
+        Args:
+            image_path:          原始图片路径
+            minio_service:       MinIOService 实例
+            invisible_watermark: 暗水印字符串，None 则跳过
+            visible_processor:   VisibleWatermarkProcessor 实例，None 则跳过明水印
+            visible_layers:      明水印层列表（WatermarkLayer list）
+            object_key:          MinIO 对象键，不传则自动生成
+            bucket_name:         目标 bucket，不传则使用 result_bucket
+        """
         start_time = time.time()
         try:
-            if image_path is not None:
-                self.image = cv2.imread(image_path)
-            if self.image is None: raise ValueError("Image not found")
-            encoded_bits = self.ecc_encoder.encode(watermark)
-            scrambled_bits = self.scrambler.scramble(encoded_bits)
-            watermarked_img = self.image_embedder.embed(self.image, scrambled_bits)
-            cv2.imwrite(output_path, watermarked_img)
+            img = cv2.imread(image_path)
+            if img is None:
+                raise ValueError(f"Cannot read image: {image_path}")
+
+            # 1. 嵌入暗水印
+            if invisible_watermark:
+                self.read_image(img)
+                img = self.embed(invisible_watermark)
+
+            # 2. 嵌入明水印
+            if visible_processor and visible_layers:
+                pil_img = Image.fromarray(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
+                pil_img = visible_processor.apply_multiple_watermarks(pil_img, visible_layers)
+                img = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
+
+            # 3. 上传 MinIO
+            success, img_buf = cv2.imencode(".png", img)
+            if not success:
+                raise RuntimeError("Failed to encode image to PNG")
+
+            target_bucket = bucket_name or minio_service.config.result_bucket
+            target_key = object_key or f"watermarked/{uuid.uuid4().hex}.png"
+
+            await minio_service.upload_file(
+                bucket_name=target_bucket,
+                object_key=target_key,
+                file_data=img_buf.tobytes(),
+                content_type="image/png",
+                metadata={"watermark": invisible_watermark or ""},
+            )
+
             return EmbedResult(
-                success=True, watermark_data=watermark, encoded_data="",
-                block_count=(0, 0), processing_time=time.time() - start_time,
-                image_size=self.image.shape[:2]
+                success=True,
+                watermark_data=invisible_watermark or "",
+                encoded_data="",
+                block_count=(0, 0),
+                processing_time=time.time() - start_time,
+                image_size=img.shape[:2],
+                minio_object_key=f"{target_bucket}/{target_key}",
             )
         except Exception as e:
-            return EmbedResult(success=False, error_message=str(e), watermark_data="", encoded_data="",
-                               block_count=(0, 0), processing_time=0, image_size=(0, 0))
+            logger.error(f"process_watermark failed: {e}", exc_info=True)
+            raise
+
+    def embed(
+        self,
+        watermark: str,
+        image_path: str = None,
+    ) -> np.ndarray:
+        """嵌入暗水印，返回含水印的图像数组，不涉及存储。"""
+        if image_path is not None:
+            self.image = cv2.imread(image_path)
+        if self.image is None:
+            raise ValueError("Image not found. Provide image_path or call read_image() first.")
+        encoded_bits = self.ecc_encoder.encode(watermark)
+        scrambled_bits = self.scrambler.scramble(encoded_bits)
+        return self.image_embedder.embed(self.image, scrambled_bits)
 
     def _get_exact_angle_using_cross_correlation(self, image: np.ndarray):
         if not self.config.enable_spatial_anchors:

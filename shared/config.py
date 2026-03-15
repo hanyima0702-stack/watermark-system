@@ -85,7 +85,7 @@ class MinIOConfig(BaseSettings):
     """MinIO对象存储配置"""
     endpoint: str = "localhost:9000"
     access_key: str = "minioadmin"
-    secret_key: str = "minioadmin123"
+    secret_key: str = "minioadmin"
     secure: bool = False
     region: str = "us-east-1"
     
@@ -104,7 +104,7 @@ class ObjectStorageConfig(BaseSettings):
     """对象存储配置（兼容旧代码）"""
     endpoint: str = "localhost:9000"
     access_key: str = "minioadmin"
-    secret_key: str = "minioadmin123"
+    secret_key: str = "minioadmin"
     secure: bool = False
     region: str = "us-east-1"
     

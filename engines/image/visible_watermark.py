@@ -64,6 +64,7 @@ class WatermarkLayer:
     size: Optional[int] = None
     opacity: float = 0.5
     enabled: bool = True
+    tiled: bool = False
 
 
 class VisibleWatermarkProcessor:
@@ -71,9 +72,19 @@ class VisibleWatermarkProcessor:
     
     def __init__(self):
         self.default_font_paths = [
-            "/System/Library/Fonts/Arial.ttf",  # macOS
-            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",  # Linux
-            "C:/Windows/Fonts/arial.ttf",  # Windows
+            # Windows 中文字体优先
+            "C:/Windows/Fonts/msyh.ttc",     # 微软雅黑
+            "C:/Windows/Fonts/simsun.ttc",    # 宋体
+            "C:/Windows/Fonts/simhei.ttf",    # 黑体
+            "C:/Windows/Fonts/arial.ttf",     # Windows 英文
+            # macOS
+            "/System/Library/Fonts/PingFang.ttc",
+            "/System/Library/Fonts/STHeiti Light.ttc",
+            "/System/Library/Fonts/Arial.ttf",
+            # Linux
+            "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
+            "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
         ]
     
     def generate_text_watermark(
@@ -281,7 +292,8 @@ class VisibleWatermarkProcessor:
             result = self.apply_watermark(
                 result, 
                 watermark, 
-                layer.position_config or PositionConfig()
+                layer.position_config or PositionConfig(),
+                tile=layer.tiled
             )
         
         return result

@@ -17,13 +17,12 @@ import cv2
 
 import io
 
-from markdown_it.rules_inline import image
-
 from .base_processor import DocumentProcessor, WatermarkConfig, DocumentProcessingError
 from .base_processor import WatermarkEmbeddingError, DigitalSignatureError
-from ..extraction.report_generator import WatermarkReportGenerator, ExtractionResult
 import numpy as np
 from ..image.invisible_watermark import InvisibleWatermarkProcessor
+from ..image.config import EmbedResult
+import uuid
 
 
 logger = logging.getLogger(__name__)
@@ -87,88 +86,142 @@ class PDFProcessor(DocumentProcessor):
             logger.error(f"Failed to add visible watermark to PDF: {e}")
             raise WatermarkEmbeddingError(f"Failed to add visible watermark: {e}")
 
-    def add_invisible_watermark(self, file_path: Path, watermark_data: str) -> Path:
+    def add_invisible_watermark(self, file_path: Path, watermark_data: str) -> bytes:
+        """
+        嵌入暗水印，返回含水印的 PDF bytes，不涉及存储。
 
+        Args:
+            file_path:      原始 PDF 路径
+            watermark_data: 64位水印字符串
+
+        Returns:
+            含水印的 PDF bytes
+        """
         if not self.is_supported_format(file_path):
             raise DocumentProcessingError(f"Unsupported format: {file_path.suffix}")
 
-        output_path = self.generate_output_path(file_path, "_invisible")
+        pdf_doc = fitz.open(str(file_path))
+        output_doc = fitz.open()
+
+        for page_num in range(len(pdf_doc)):
+            page = pdf_doc[page_num]
+
+            mat = fitz.Matrix(300 / 72, 300 / 72)
+            pix = page.get_pixmap(matrix=mat, alpha=False)
+
+            img_data = np.frombuffer(pix.samples, dtype=np.uint8)
+            img_array = img_data.reshape(pix.height, pix.width, pix.n)
+            img_array = cv2.cvtColor(img_array, cv2.COLOR_RGB2BGR)
+
+            self.imageProcessor.read_image(img_array)
+            embed_img = self.imageProcessor._embed_to_array(watermark_data)
+
+            new_page = output_doc.new_page(width=page.rect.width, height=page.rect.height)
+
+            uint8_img = np.clip(np.round(embed_img), 0, 255).astype(np.uint8)
+            uint8_img = cv2.cvtColor(uint8_img, cv2.COLOR_BGR2RGB)
+
+            img_buffer = io.BytesIO()
+            Image.fromarray(uint8_img).save(img_buffer, format="PNG")
+            img_buffer.seek(0)
+
+            new_page.insert_image(new_page.rect, stream=img_buffer.getvalue())
+            logger.info(f"第 {page_num} 页处理完毕")
+
+        page_count = len(pdf_doc)
+        pdf_buffer = io.BytesIO()
+        output_doc.save(pdf_buffer)
+        output_doc.close()
+        pdf_doc.close()
+
+        logger.info(f"PDF 暗水印嵌入完毕，共 {page_count} 页")
+        return pdf_buffer.getvalue()
+
+    async def process_watermark(
+        self,
+        file_path: Path,
+        minio_service,
+        invisible_watermark: str = None,
+        visible_watermark_config: WatermarkConfig = None,
+        user_id: str = "",
+        timestamp: datetime = None,
+        object_key: str = None,
+        bucket_name: str = None,
+    ) -> EmbedResult:
+        """
+        上层方法：根据参数决定嵌入明/暗水印，最终上传 MinIO。
+
+        Args:
+            file_path:               原始 PDF 路径
+            minio_service:           MinIOService 实例
+            invisible_watermark:     暗水印字符串，None 则跳过
+            visible_watermark_config: 明水印配置，None 则跳过
+            user_id:                 用户ID（明水印模板变量）
+            timestamp:               时间戳（明水印模板变量）
+            object_key:              MinIO 对象键，不传则自动生成
+            bucket_name:             目标 bucket，不传则使用 result_bucket
+        """
+        import time
+        start_time = time.time()
+        timestamp = timestamp or datetime.utcnow()
 
         try:
-            # 打开PDF文档
-            pdf_doc = fitz.open(str(file_path))
+            # 1. 嵌入暗水印 -> 得到 PDF bytes
+            if invisible_watermark:
+                pdf_bytes = self.add_invisible_watermark(file_path, invisible_watermark)
+                # 后续明水印在内存中的 PDF 上操作
+                working_doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+            else:
+                working_doc = fitz.open(str(file_path))
 
-            # 创建新的PDF文档
-            output_doc = fitz.open()
+            # 2. 嵌入明水印（直接在 fitz 文档上操作）
+            if visible_watermark_config:
+                visible_cfg = visible_watermark_config.visible_watermark
+                if visible_cfg.get("enabled", False):
+                    for page_num in range(len(working_doc)):
+                        page = working_doc[page_num]
+                        for layer in visible_cfg.get("layers", []):
+                            if layer.get("type") == "text":
+                                self._add_pdf_text_watermark(page, layer, user_id, timestamp)
+                            elif layer.get("type") == "qrcode":
+                                self._add_pdf_qrcode_watermark(page, layer, user_id, timestamp)
 
-            # 处理每一页
-            for page_num in range(len(pdf_doc)):
-                page = pdf_doc[page_num]
+            # 3. 序列化最终 PDF
+            final_buffer = io.BytesIO()
+            working_doc.save(final_buffer)
+            final_bytes = final_buffer.getvalue()
+            page_count = len(working_doc)
+            working_doc.close()
 
-                # 将PDF页面渲染为高分辨率图像（300 DPI）
-                mat = fitz.Matrix(300/72, 300/72)  # 300 DPI
-                pix = page.get_pixmap(matrix=mat, alpha=False)
+            # 4. 上传 MinIO
+            target_bucket = bucket_name or minio_service.config.result_bucket
+            target_key = object_key or f"watermarked/{uuid.uuid4().hex}.pdf"
 
-                # 转换为numpy数组
-                img_data = np.frombuffer(pix.samples, dtype=np.uint8)
-                img_array = img_data.reshape(pix.height, pix.width, pix.n)
+            await minio_service.upload_file(
+                bucket_name=target_bucket,
+                object_key=target_key,
+                file_data=final_bytes,
+                content_type="application/pdf",
+                metadata={"watermark": invisible_watermark or "", "source": str(file_path)},
+            )
 
-                # RGB -> BGR
-                img_array = cv2.cvtColor(img_array, cv2.COLOR_RGB2BGR)
+            logger.info(f"PDF 水印处理完毕，已上传至 {target_bucket}/{target_key}")
 
-                #读取原图片
-                self.imageProcessor.read_image(img_array)
+            return EmbedResult(
+                success=True,
+                watermark_data=invisible_watermark or "",
+                encoded_data="",
+                block_count=(0, page_count),
+                processing_time=time.time() - start_time,
+                image_size=(0, 0),
+                minio_object_key=f"{target_bucket}/{target_key}",
+            )
 
-                #嵌入水印
-
-                embed_img =self.imageProcessor.embed_watermark()
-
-
-                # 将含水印的图像转换回PDF页面
-                new_page = output_doc.new_page(
-                    width=page.rect.width,
-                    height=page.rect.height
-                )
-
-                # 将图像插入新页面
-                img_buffer = io.BytesIO()
-                from PIL import Image
-
-                # 四舍五入
-                rounded_img = np.round(embed_img)
-
-                #限制范围
-                clipped_img = np.clip(rounded_img, 0, 255)
-
-                #类型转换
-                uint8_img = clipped_img.astype(np.uint8)
-
-                #颜色空间转换 BGR -> RGB
-                # if uint8_img.shape[2] == 3:  # 确保是彩色图片
-                uint8_img = cv2.cvtColor(uint8_img, cv2.COLOR_BGR2RGB)
-
-                pil_img = Image.fromarray(uint8_img)
-                pil_img.save(img_buffer, format='PNG')
-                img_buffer.seek(0)
-
-                # 插入图像到页面
-                img_rect = new_page.rect
-                new_page.insert_image(img_rect, stream=img_buffer.getvalue())
-
-                logger.info(f"{page_num}页处理完毕")
-
-            # 保存输出PDF
-            output_doc.save(str(output_path))
-            output_doc.close()
-            pdf_doc.close()
-
-            logger.info(f"PDF: {output_path}水印添加完毕")
-
-            return output_path
-
+        except (DocumentProcessingError, ValueError):
+            raise
         except Exception as e:
-            logger.error(f"Failed to add invisible watermark to PDF: {e}")
-            raise WatermarkEmbeddingError(f"Failed to add invisible watermark: {e}")
+            logger.error(f"PDF 水印处理失败: {e}")
+            raise WatermarkEmbeddingError(f"Failed to process watermark: {e}")
 
 
     def add_digital_signature(self, file_path: Path, certificate_path: Path, password: str) -> Path:
@@ -206,36 +259,63 @@ class PDFProcessor(DocumentProcessor):
             logger.error(f"Failed to add digital signature to PDF: {e}")
             raise DigitalSignatureError(f"Failed to add digital signature: {e}")
 
-    def extract_invisible_watermark(self, file_path: Path,output_path: Path, page=[1,1]) -> Optional[str]:
+    def extract_invisible_watermark(self, file_path: Path, pages=None) -> Optional[dict]:
+        """
+        从 PDF 中提取暗水印。逐页渲染为图像后调用图片提取引擎。
+
+        Args:
+            file_path: PDF 文件路径
+            pages:     要提取的页码范围 [start, end)，默认只提取第一页
+
+        Returns:
+            dict with watermark_data, confidence etc. or None
+        """
         try:
             pdf_doc = fitz.open(str(file_path))
+            total_pages = len(pdf_doc)
+            if pages is None:
+                pages = [0, min(1, total_pages)]
 
+            for page_idx in range(pages[0], min(pages[1], total_pages)):
+                pg = pdf_doc[page_idx]
 
-            # 从指定范围提取水印
-            for i in range(page[0],page[1]):
-                page = pdf_doc[i]
+                mat = fitz.Matrix(300 / 72, 300 / 72)
+                pix = pg.get_pixmap(matrix=mat, alpha=False)
 
-                # 将页面渲染为图像（300 DPI）
-                mat = fitz.Matrix(300/72, 300/72)
-                pix = page.get_pixmap(matrix=mat, alpha=False)
-
-                # 转换为numpy数组
                 img_data = np.frombuffer(pix.samples, dtype=np.uint8)
                 img_array = img_data.reshape(pix.height, pix.width, pix.n)
 
-                self.imageProcessor.read_image(img_array)
+                # RGB -> BGR for OpenCV
+                bgr_img = cv2.cvtColor(img_array, cv2.COLOR_RGB2BGR)
 
-                #颜色空间转换 RGB -> BGR
-                # if uint8_img.shape[2] == 3:  # 确保是彩色图片
-                uint8_img = cv2.cvtColor(img_array, cv2.COLOR_RGB2BGR)
+                # 保存为临时图片供 extract_watermark 使用
+                import tempfile
+                with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmp:
+                    cv2.imwrite(tmp.name, bgr_img)
+                    tmp_img_path = tmp.name
 
-                self.imageProcessor.extract_watermark()
-
+                try:
+                    result = self.imageProcessor.extract_watermark(image_path=tmp_img_path)
+                    if result.success:
+                        pdf_doc.close()
+                        return {
+                            "watermark_data": result.watermark_data,
+                            "confidence": result.confidence,
+                            "page": page_idx,
+                        }
+                finally:
+                    import os
+                    try:
+                        os.unlink(tmp_img_path)
+                    except OSError:
+                        pass
 
             pdf_doc.close()
+            return None
 
         except Exception as e:
-            logger.error(f"Failed to extract FFT invisible watermark from PDF: {e}")
+            logger.error(f"Failed to extract watermark from PDF: {e}")
+            return None
 
 
 
