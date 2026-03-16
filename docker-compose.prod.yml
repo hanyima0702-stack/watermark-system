@@ -1,0 +1,155 @@
+version: '3.8'
+
+services:
+  # MySQL 数据库
+  mysql:
+    image: mysql:8.0
+    container_name: watermark-mysql
+    restart: always
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-rootpassword123}
+      MYSQL_DATABASE: watermark_system
+      MYSQL_USER: watermark_user
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-watermark_pass}
+    ports:
+      - "3306:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+      - ./storage/migrations/mysql:/docker-entrypoint-initdb.d
+    command: >
+      --character-set-server=utf8mb4
+      --collation-server=utf8mb4_unicode_ci
+      --default-authentication-plugin=mysql_native_password
+      --max-connections=200
+      --innodb-buffer-pool-size=256M
+    networks:
+      - watermark-network
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  # Redis 缓存
+  redis:
+    image: redis:7-alpine
+    container_name: watermark-redis
+    restart: always
+    command: redis-server --requirepass ${REDIS_PASSWORD:-redis123} --maxmemory 256mb --maxmemory-policy allkeys-lru
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - watermark-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD:-redis123}", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # MinIO 对象存储
+  minio:
+    image: minio/minio:latest
+    container_name: watermark-minio
+    restart: always
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ACCESS_KEY:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY:-minioadmin123}
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio_data:/data
+    networks:
+      - watermark-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  # MinIO 初始化 - 创建 buckets
+  minio-init:
+    image: minio/mc:latest
+    container_name: watermark-minio-init
+    depends_on:
+      minio:
+        condition: service_healthy
+    environment:
+      MC_HOST_myminio: http://${MINIO_ACCESS_KEY:-minioadmin}:${MINIO_SECRET_KEY:-minioadmin123}@minio:9000
+    entrypoint: >
+      /bin/sh -c "
+      mc mb --ignore-existing myminio/watermark-videos;
+      mc mb --ignore-existing myminio/watermark-documents;
+      mc mb --ignore-existing myminio/watermark-audios;
+      mc mb --ignore-existing myminio/watermark-images;
+      mc mb --ignore-existing myminio/watermark-results;
+      echo 'MinIO buckets created';
+      "
+    networks:
+      - watermark-network
+
+  # 后端 API Gateway
+  api-gateway:
+    build:
+      context: .
+      dockerfile: Dockerfile.prod
+    container_name: watermark-api
+    restart: always
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env.prod
+    environment:
+      - DATABASE_HOST=mysql
+      - DATABASE_PORT=3306
+      - REDIS_URL=redis://:${REDIS_PASSWORD:-redis123}@redis:6379/0
+      - MINIO_ENDPOINT=minio:9000
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    volumes:
+      - upload_data:/data/uploads
+      - output_data:/data/outputs
+    networks:
+      - watermark-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  # 前端 (Nginx + React)
+  frontend:
+    build:
+      context: ../watermark-frontend
+      dockerfile: Dockerfile
+    container_name: watermark-frontend
+    restart: always
+    ports:
+      - "80:80"
+    depends_on:
+      api-gateway:
+        condition: service_healthy
+    networks:
+      - watermark-network
+
+volumes:
+  mysql_data:
+  redis_data:
+  minio_data:
+  upload_data:
+  output_data:
+
+networks:
+  watermark-network:
+    driver: bridge
