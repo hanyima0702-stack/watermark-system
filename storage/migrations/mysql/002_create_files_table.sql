@@ -20,5 +20,5 @@ CREATE TABLE IF NOT EXISTS files (
     INDEX idx_upload_time (upload_time),
     INDEX idx_status (status),
     INDEX idx_file_type (file_type),
-    CONSTRAINT fk_files_user_id FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+    CONSTRAINT fk_files_user_id FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='File metadata table';

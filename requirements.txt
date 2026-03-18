@@ -3,6 +3,7 @@ fastapi==0.104.1
 uvicorn[standard]==0.24.0
 pydantic==2.5.0
 pydantic-settings==2.1.0
+aiofiles==23.2.1
 
 # Database
 sqlalchemy==2.0.23
@@ -25,8 +26,9 @@ boto3==1.34.0
 # Authentication and Security
 python-jose[cryptography]==3.3.0
 passlib[bcrypt]==1.7.4
+bcrypt==4.0.1
 python-multipart==0.0.6
-cryptography==41.0.8
+cryptography==41.0.7
 pyotp==2.9.0
 qrcode[pil]==7.4.2
 ldap3==2.9.1
@@ -39,21 +41,23 @@ python-pptx==0.6.23
 
 # Image Processing
 Pillow==10.1.0
-opencv-python==4.8.1.78
-numpy==1.25.2
-scipy==1.11.4
+opencv-python>=4.8.1.78
+numpy>=1.25.2
+scipy>=1.11.4
 
 # Error Correction Coding (for invisible watermark)
-bchlib==0.14.0
+bchlib>=0.14.0
+reedsolo>=1.7.0
+bchlib>=0.14.0
 
 # Audio/Video Processing
 ffmpeg-python==0.2.0
-librosa==0.10.1
-moviepy==1.0.3
+librosa>=0.10.1
+moviepy>=1.0.3
 
 # Machine Learning (for watermark algorithms)
-scikit-learn==1.3.2
-scikit-image==0.22.0
+scikit-learn>=1.3.2
+scikit-image>=0.22.0
 
 # Logging and Monitoring
 structlog==23.2.0

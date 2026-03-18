@@ -12,9 +12,10 @@ CREATE TABLE IF NOT EXISTS user_sessions (
     ip_address VARCHAR(45) NULL COMMENT 'Client IP address (IPv4 or IPv6)',
     user_agent VARCHAR(500) NULL COMMENT 'Client user agent string',
     is_active BOOLEAN DEFAULT TRUE COMMENT 'Session active status',
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT 'Last update time',
     INDEX idx_user_id (user_id),
     INDEX idx_token_hash (token_hash),
     INDEX idx_expires_at (expires_at),
     INDEX idx_is_active (is_active),
-    CONSTRAINT fk_user_sessions_user_id FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+    CONSTRAINT fk_user_sessions_user_id FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='User sessions table';

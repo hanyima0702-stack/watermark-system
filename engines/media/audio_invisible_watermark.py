@@ -12,6 +12,9 @@ import numpy as np
 from pathlib import Path
 from scipy import signal
 import warnings
+import numpy as np
+from collections import Counter
+
 
 logger = logging.getLogger(__name__)
 
@@ -50,169 +53,136 @@ class AudioInvisibleWatermarkConfig:
 
 class EchoHidingWatermark:
     """回声隐藏音频水印算法"""
-    
+
     def __init__(
-        self,
-        delay_0: int = 100,
-        delay_1: int = 150,
-        decay: float = 0.5,
-        strength: float = 0.5
+            self,
+            delay_0: int = 150,
+            delay_1: int = 250,
+            decay: float = 0.5,  # 恢复到0.5，避免回声过大干扰音质
+            strength: float = 0.5
     ):
-        """
-        Args:
-            delay_0: 表示比特0的回声延迟（样本数）
-            delay_1: 表示比特1的回声延迟（样本数）
-            decay: 回声衰减系数
-            strength: 水印强度
-        """
         self.delay_0 = delay_0
         self.delay_1 = delay_1
         self.decay = decay
         self.strength = strength
-    
-    def embed(
-        self,
-        audio: np.ndarray,
-        watermark_bits: np.ndarray,
-        sample_rate: int = 44100
-    ) -> np.ndarray:
-        """
-        使用回声隐藏技术嵌入水印
-        
-        Args:
-            audio: 音频信号 (单声道或立体声)
-            watermark_bits: 水印比特序列
-            sample_rate: 采样率
-            
-        Returns:
-            含水印的音频信号
-        """
-        # 处理立体声
+        self.segment_length = 4096
+
+        # 【修复2】16位超强同步头，自然界噪音几乎不可能撞上
+        self.sync_header = np.array([1, 0, 1, 1, 0, 1, 0, 0, 1, 1, 1, 0, 1, 0, 0, 0], dtype=int)
+
+    def _compute_cepstrum(self, signal: np.ndarray) -> np.ndarray:
+        windowed_signal = signal * np.hanning(len(signal))
+        spectrum = np.fft.fft(windowed_signal)
+        log_spectrum = np.log(np.abs(spectrum) + 1e-10)
+        cepstrum = np.real(np.fft.ifft(log_spectrum))
+        return np.abs(cepstrum[:len(cepstrum) // 2])
+
+    def embed(self, audio: np.ndarray, watermark_bits: np.ndarray, sample_rate: int = 44100) -> np.ndarray:
         if len(audio.shape) > 1:
-            # 只在第一个声道嵌入
             watermarked = audio.copy()
-            watermarked[:, 0] = self._embed_mono(audio[:, 0], watermark_bits, sample_rate)
+            watermarked[:, 0] = self._embed_mono(audio[:, 0], watermark_bits)
             return watermarked
         else:
-            return self._embed_mono(audio, watermark_bits, sample_rate)
-    
-    def _embed_mono(
-        self,
-        audio: np.ndarray,
-        watermark_bits: np.ndarray,
-        sample_rate: int
-    ) -> np.ndarray:
-        """在单声道音频中嵌入水印"""
-        # 计算每个比特的段长度
-        segment_length = len(audio) // len(watermark_bits)
-        
-        if segment_length < max(self.delay_0, self.delay_1) * 2:
-            raise ValueError(
-                f"Audio too short for {len(watermark_bits)} bits. "
-                f"Need at least {max(self.delay_0, self.delay_1) * 2 * len(watermark_bits)} samples"
-            )
-        
+            return self._embed_mono(audio, watermark_bits)
+
+    def _embed_mono(self, audio: np.ndarray, watermark_bits: np.ndarray) -> np.ndarray:
+        frame_bits = np.concatenate((self.sync_header, watermark_bits))
+        frame_len = len(frame_bits)
+        total_segments = len(audio) // self.segment_length
+
+        if total_segments < frame_len:
+            raise ValueError(f"Audio is too short! Need at least {frame_len * self.segment_length} samples.")
+
+        repeated_bits = np.tile(frame_bits, total_segments // frame_len + 1)[:total_segments]
         watermarked = audio.copy().astype(np.float64)
-        
-        # 对每个比特段嵌入回声
-        for i, bit in enumerate(watermark_bits):
-            start_idx = i * segment_length
-            end_idx = min((i + 1) * segment_length, len(audio))
+
+        for i, bit in enumerate(repeated_bits):
+            start_idx = i * self.segment_length
+            end_idx = start_idx + self.segment_length
             segment = audio[start_idx:end_idx]
-            
-            # 根据比特值选择延迟
+
             delay = self.delay_1 if bit == 1 else self.delay_0
-            
-            # 创建回声信号
             echo = np.zeros_like(segment)
             if len(segment) > delay:
                 echo[delay:] = segment[:-delay] * self.decay * self.strength
-            
-            # 混合原始信号和回声
+
             watermarked[start_idx:end_idx] = segment + echo
-        
-        # 归一化防止溢出
+
         max_val = np.abs(watermarked).max()
         if max_val > 1.0:
             watermarked = watermarked / max_val * 0.95
-        
+
         return watermarked
-    
-    def extract(
-        self,
-        watermarked_audio: np.ndarray,
-        watermark_length: int,
-        sample_rate: int = 44100
-    ) -> Tuple[np.ndarray, np.ndarray]:
-        """
-        从音频中提取水印
-        
-        Args:
-            watermarked_audio: 含水印的音频信号
-            watermark_length: 水印比特数
-            sample_rate: 采样率
-            
-        Returns:
-            (extracted_bits, confidence): 提取的比特序列和置信度
-        """
-        # 处理立体声
+
+    def extract(self, watermarked_audio: np.ndarray, watermark_length: int, sample_rate: int = 44100):
         if len(watermarked_audio.shape) > 1:
             audio = watermarked_audio[:, 0]
         else:
             audio = watermarked_audio
-        
-        segment_length = len(audio) // watermark_length
-        extracted_bits = np.zeros(watermark_length, dtype=int)
-        confidence = np.zeros(watermark_length)
-        
-        # 对每个段进行自相关分析
-        for i in range(watermark_length):
-            start_idx = i * segment_length
-            end_idx = min((i + 1) * segment_length, len(audio))
-            segment = audio[start_idx:end_idx]
 
-            cepstrum = self._compute_cepstrum(segment)
+        header_len = len(self.sync_header)
+        best_payloads = []
+        max_score = -1
+        step_size = 512
 
-            # 检测两个延迟位置的峰值
-            peak_0 = cepstrum[self.delay_0] if self.delay_0 < len(cepstrum) else 0
-            peak_1 = cepstrum[self.delay_1] if self.delay_1 < len(cepstrum) else 0
+        for offset in range(0, self.segment_length, step_size):
+            shifted_audio = audio[offset:]
+            total_segments = len(shifted_audio) // self.segment_length
 
-            # 根据峰值大小判断比特
-            total_peak = abs(peak_0) + abs(peak_1) + 1e-10
-            if peak_1 > peak_0:
-                extracted_bits[i] = 1
-                confidence[i] = min(abs(peak_1) / total_peak, 1.0)
-            else:
-                extracted_bits[i] = 0
-                confidence[i] = min(abs(peak_0) / total_peak, 1.0)
-        
-        return extracted_bits, confidence
-    
-    def _compute_autocorrelation(self, signal: np.ndarray) -> np.ndarray:
-        """计算信号的自相关"""
-        n = len(signal)
-        autocorr = np.correlate(signal, signal, mode='full')
-        autocorr = autocorr[n-1:]  # 只取正延迟部分
-        autocorr = autocorr / autocorr[0]  # 归一化
-        return autocorr
+            if total_segments < header_len + watermark_length:
+                continue
 
-    def _compute_cepstrum(self, signal: np.ndarray) -> np.ndarray:
-        """计算信号的实倒谱 (Real Cepstrum)"""
-        # 加窗，减少 FFT 的频谱泄漏
-        windowed_signal = signal * np.hanning(len(signal))
+            raw_bits = np.zeros(total_segments, dtype=int)
 
-        # 1. 计算 FFT
-        spectrum = np.fft.fft(windowed_signal)
+            for i in range(total_segments):
+                start_idx = i * self.segment_length
+                end_idx = start_idx + self.segment_length
+                segment = shifted_audio[start_idx:end_idx]
+                cepstrum = self._compute_cepstrum(segment)
 
-        # 2. 计算幅度谱的对数 (加一个小偏置防止 log(0))
-        log_spectrum = np.log(np.abs(spectrum) + 1e-10)
+                # 【修复1】局部基线减法：计算周围 10 个点的平均能量作为基线
+                # 同时允许峰值有 1 个采样点的偏移容错
+                if self.delay_1 + 6 > len(cepstrum):
+                    continue
 
-        # 3. 计算 IFFT 得到倒谱
-        cepstrum = np.real(np.fft.ifft(log_spectrum))
+                peak_0 = np.max(cepstrum[self.delay_0 - 1: self.delay_0 + 2])
+                base_0 = np.mean(cepstrum[self.delay_0 - 5: self.delay_0 + 6])
+                prominence_0 = peak_0 - base_0  # 相对凸起高度
 
-        # 只需要正延迟部分，并且取绝对值以便寻找峰值
-        half_len = len(cepstrum) // 2
-        return np.abs(cepstrum[:half_len])
+                peak_1 = np.max(cepstrum[self.delay_1 - 1: self.delay_1 + 2])
+                base_1 = np.mean(cepstrum[self.delay_1 - 5: self.delay_1 + 6])
+                prominence_1 = peak_1 - base_1
+
+                raw_bits[i] = 1 if prominence_1 > prominence_0 else 0
+
+            found_payloads = []
+
+            # 【修复3】必须零误码 (err == 0)，拒绝所有假密码
+            for i in range(len(raw_bits) - header_len - watermark_length + 1):
+                window = raw_bits[i:i + header_len]
+                err = np.sum(np.abs(window - self.sync_header))
+
+                if err == 0:
+                    payload_start = i + header_len
+                    payload_end = payload_start + watermark_length
+                    found_payloads.append(raw_bits[payload_start:payload_end])
+
+            score = len(found_payloads)
+            if score > max_score and score > 0:
+                max_score = score
+                best_payloads = found_payloads
+
+        if not best_payloads:
+            logger.warning("Failed to find any matching sync headers.")
+            return np.zeros(watermark_length, dtype=int), 0.0
+
+        final_bits = np.zeros(watermark_length, dtype=int)
+        for bit_idx in range(watermark_length):
+            column_bits = [payload[bit_idx] for payload in best_payloads]
+            final_bits[bit_idx] = Counter(column_bits).most_common(1)[0][0]
+
+        confidence = min(1.0, float(len(best_payloads)) / 3.0)
+        return final_bits, confidence
 
 
 class PhaseCodingWatermark:

@@ -2,7 +2,7 @@ from engines.image.invisible_watermark import InvisibleWatermarkProcessor
 from PIL import Image, ImageEnhance
 import cv2
 import numpy as np
-from engines.media.video_invisible_watermark import VideoWatermarker
+from engines.media.video_invisible_watermark import VideoWatermarkProcessor
 from engines.media.audio_invisible_watermark import AudioInvisibleWatermarker
 from pydub import AudioSegment
 import os
@@ -132,11 +132,11 @@ class Test:
 
 
     def test_cut_audio(self):
-        input = "D:/video/watermarked.wav"
+        input = "D:/video/audio3.wav"
         output_file="D:/video/watermarked1.wav"
         audio = AudioSegment.from_file(input)
         start_time=0
-        end_time=100000
+        end_time=5000
 
         # 截取音频片段
         cut_audio = audio[start_time:end_time]

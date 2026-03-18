@@ -584,35 +584,49 @@ def _detect_file_type(ext: str) -> str:
 @router.get("/watermark/result")
 async def download_watermark_result(
     key: str,
+    mode: str = "url",
     current_user = Depends(get_current_user),
 ):
     """
-    通过 minio_object_key 下载水印结果文件。
+    通过 minio_object_key 获取下载链接或直接下载。
     key 格式: {bucket}/{object_key}
+    mode: "url" 返回预签名URL, "stream" 直接返回文件流
     """
-    from fastapi.responses import StreamingResponse
-    import io
-
     parts = key.split("/", 1)
     if len(parts) != 2:
         raise HTTPException(status_code=400, detail="Invalid key format")
     bucket, obj_key = parts
 
-    # 只允许下载属于当前用户的结果
     user_id = current_user["user_id"]
-    if f"results/{user_id}/" not in obj_key and not obj_key.startswith(f"results/{user_id}/"):
+    expected_prefix = f"results/{user_id}/"
+    if not obj_key.startswith(expected_prefix):
         raise HTTPException(status_code=403, detail="Access denied")
+
+    if not file_service._initialized:
+        await file_service.initialize()
 
     minio_svc = file_service.minio_service
     if not minio_svc:
         raise HTTPException(status_code=503, detail="Storage service unavailable")
 
+    if mode == "url":
+        filename = obj_key.split("/")[-1]
+        presigned_url = await minio_svc.get_presigned_url(
+            bucket_name=bucket,
+            object_key=obj_key,
+            expires_in=3600,
+            method="GET",
+            download_filename=filename,
+        )
+        return {"download_url": presigned_url}
+
+    # stream 模式：直接返回文件流
+    from fastapi.responses import StreamingResponse
+    import io
     file_bytes = await minio_svc.download_file(bucket, obj_key)
     filename = obj_key.split("/")[-1]
-
     import mimetypes
     content_type = mimetypes.guess_type(filename)[0] or "application/octet-stream"
-
     return StreamingResponse(
         io.BytesIO(file_bytes),
         media_type=content_type,

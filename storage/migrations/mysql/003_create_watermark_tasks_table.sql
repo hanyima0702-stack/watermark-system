@@ -19,7 +19,7 @@ CREATE TABLE IF NOT EXISTS watermark_tasks (
     INDEX idx_status (status),
     INDEX idx_created_at (created_at),
     INDEX idx_task_type (task_type),
-    CONSTRAINT fk_watermark_tasks_user_id FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+    CONSTRAINT fk_watermark_tasks_user_id FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE,
     CONSTRAINT fk_watermark_tasks_file_id FOREIGN KEY (file_id) REFERENCES files(id) ON DELETE CASCADE,
     CONSTRAINT fk_watermark_tasks_result_file_id FOREIGN KEY (result_file_id) REFERENCES files(id) ON DELETE SET NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='Watermark tasks table';

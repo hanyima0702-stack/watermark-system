@@ -277,7 +277,8 @@ class MinIOService:
         bucket_name: str,
         object_key: str,
         expires_in: int = 3600,
-        method: str = "GET"
+        method: str = "GET",
+        download_filename: str = None
     ) -> str:
         """
         生成预签名URL
@@ -287,6 +288,7 @@ class MinIOService:
             object_key: 对象键（文件路径）
             expires_in: 过期时间（秒）
             method: HTTP方法（GET或PUT）
+            download_filename: 如果指定，设置 Content-Disposition 强制下载
             
         Returns:
             str: 预签名URL
@@ -298,13 +300,22 @@ class MinIOService:
             loop = asyncio.get_event_loop()
             
             if method == "GET":
-                url = await loop.run_in_executor(
-                    None,
-                    self._client.presigned_get_object,
-                    bucket_name,
-                    object_key,
-                    timedelta(seconds=expires_in)
-                )
+                extra_kwargs = {}
+                if download_filename:
+                    from urllib.parse import quote
+                    extra_kwargs['response_headers'] = {
+                        "response-content-disposition": f"attachment; filename*=UTF-8''{quote(download_filename)}"
+                    }
+
+                def _get_url():
+                    return self._client.presigned_get_object(
+                        bucket_name,
+                        object_key,
+                        timedelta(seconds=expires_in),
+                        **extra_kwargs
+                    )
+
+                url = await loop.run_in_executor(None, _get_url)
             elif method == "PUT":
                 url = await loop.run_in_executor(
                     None,
