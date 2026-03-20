@@ -8,6 +8,7 @@ from pydub import AudioSegment
 import os
 from moviepy.video.io.VideoFileClip import VideoFileClip
 import os
+import subprocess
 
 class Test:
 
@@ -114,27 +115,37 @@ class Test:
         watermarker = VideoWatermarker()
         watermarker.extract_from_timerange(input,0,1)
 
+    import subprocess
 
-    def test_cut_video(self):
-        input_path= "D:/video/video1.mp4"
+    def test_cut_video_lossless(self):
+        input_path = "D:/video/1111.mp4"
         start_time = 0
-        end_time=10
-        output_path= "D:/video/video11.mp4"
-        # 加载视频
-        video = VideoFileClip(input_path)
+        end_time = 10
+        output_path = "D:/video/22_lossless.mp4"
 
-        # 截取视频片段
-        sub_video = video.subclipped(start_time, end_time)
+        # 构建 FFmpeg 命令进行无损流拷贝
+        cmd = [
+            "ffmpeg", "-y",
+            "-ss", str(start_time),
+            "-t", str(end_time - start_time),
+            "-i", input_path,
+            "-c:v", "copy",  # 核心关键点：复制视频流，绝对不重新编码！
+            "-c:a", "copy",  # 复制音频流
+            output_path
+        ]
 
-        # 保存视频
-        sub_video.write_videofile(output_path, codec='libx264', audio_codec='aac')
+        try:
+            print(f"开始无损截取视频: {input_path} ...")
+            # 运行命令
+            subprocess.run(cmd, check=True, capture_output=True, text=True)
+            print(f"视频无损截取成功！保存至: {output_path}")
+            return True
+        except subprocess.CalledProcessError as e:
+            print(f"截取失败！FFmpeg 报错信息:\n{e.stderr}")
+            return False
 
-        # 关闭视频文件
-        video.close()
-        sub_video.close()
-
-        print(f"视频截取成功！保存至: {output_path}")
-        return True
+    # 运行测试
+    # test_cut_video_lossless()
 
 
 

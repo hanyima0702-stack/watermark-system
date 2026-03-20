@@ -196,6 +196,18 @@ class WatermarkWorker:
 
             if msg.action == WatermarkAction.EMBED.value:
                 result = await self._embed_watermark(msg, tmp_path, category)
+
+                # 【新增修复】在成功嵌入后，将源数据的信息补充回 result 字典中
+                if isinstance(result, dict) and result.get("success"):
+                    # 尝试从 msg 中获取备注字段 (取决于你的 WatermarkTaskMessage 是如何定义这个属性的)
+                    note = getattr(msg, "invisible_note", getattr(msg, "watermark_note", None))
+
+                    result.update({
+                        "visible_text": msg.visible_text,
+                        "invisible_note": note,
+                        "watermark_bits": msg.watermark_bits,
+                    })
+
             elif msg.action == WatermarkAction.EXTRACT.value:
                 result = await self._extract_watermark(msg, tmp_path, category)
             else:
@@ -604,14 +616,14 @@ class WatermarkWorker:
             values = {"status": status}
             if status == "completed":
                 values["progress"] = 100.0
-                values["completed_at"] = datetime.utcnow()
+                values["completed_at"] = datetime.now()
                 if result:
                     values["quality_metrics"] = result
                 if processing_time:
                     values["processing_time"] = processing_time
             elif status == "failed":
                 values["error_message"] = error_message
-                values["completed_at"] = datetime.utcnow()
+                values["completed_at"] = datetime.now()
             await session.execute(
                 update(WatermarkTask).where(WatermarkTask.task_id == task_id).values(**values)
             )

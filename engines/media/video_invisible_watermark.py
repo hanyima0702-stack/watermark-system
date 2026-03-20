@@ -70,9 +70,9 @@ class VideoWatermarker:
     def __init__(self, config: WatermarkConfig = None):
         if config is None:
             config = WatermarkConfig(
-                modulation_strength=30,
+                modulation_strength=0,
                 enable_spatial_anchors=True,
-                anchor_strength=1.5
+                anchor_strength=0
             )
         self.config = config
         self.processor = InvisibleWatermarkProcessor(self.config)
@@ -80,7 +80,7 @@ class VideoWatermarker:
     def embed_video_timerange(self, input_video_path: str, output_video_path: str,
                               watermark_text: str, start_time: float,
                               end_time: Optional[float] = None):
-        """在视频的指定时间范围内（秒）逐帧嵌入水印。"""
+        """在视频的指定时间范围内（秒）逐帧嵌入水印。使用 FFmpeg 内存管道无损直写。"""
         logger.info(f"开始处理视频: {input_video_path}")
         start_process_time = time.time()
 
@@ -105,91 +105,116 @@ class VideoWatermarker:
         if start_frame >= total_frames:
             raise ValueError(f"指定的开始时间 ({start_time}s) 超出了视频总时长。")
 
-        # 使用无损中间格式保留水印信号，避免有损编码破坏频域水印
-        # 先写 AVI (FFV1 无损)，处理完后用 FFmpeg 转高质量 H.264
-        lossless_tmp = tempfile.NamedTemporaryFile(suffix='.avi', delete=False).name
-        fourcc = cv2.VideoWriter_fourcc(*'FFV1')
-        out = cv2.VideoWriter(lossless_tmp, fourcc, fps, (width, height))
+        # ---------------- 核心修改一：构建 FFmpeg 管道命令 ----------------
+        ffmpeg_cmd = shutil.which("ffmpeg")
+        if not ffmpeg_cmd:
+            raise RuntimeError("未找到 FFmpeg，无法进行流式编码！请确保已安装 FFmpeg 并配置了环境变量。")
+
+        logger.info(
+            f"目标嵌入区间: {start_time}s - {end_time}s (帧 {start_frame} 到 {end_frame}), 总帧数 {total_frames}")
+
+        cmd = [
+            ffmpeg_cmd, "-y",
+            # 1. 声明通过 stdin 接收纯裸像素数据 (Raw Video)
+            "-f", "rawvideo",
+            "-vcodec", "rawvideo",
+            "-s", f"{width}x{height}",
+            "-pix_fmt", "bgr24",  # OpenCV 读取的默认格式是 BGR
+            "-r", str(fps),  # 强制输入帧率为原视频帧率
+            "-i", "-",  # 从标准输入读取视频流
+
+            # 2. 读取原视频，专门用来提取音轨
+            "-i", input_video_path,
+
+            # 3. 映射流：视频来自裸流(0:v:0)，音频来自原视频(1:a?)，"?"代表即使没声音也不报错
+            "-map", "0:v:0",
+            "-map", "1:a?",
+
+            # 4. 编码参数设定
+            "-c:v", "libx264",
+            "-crf", "18",
+            "-preset", "medium",
+
+            # 👇 新增参数 1：将水印视为噪点颗粒进行保护，禁止编码器抹除高频细节
+            "-tune", "grain",
+
+            # 👇 新增参数 2：彻底关闭长效宏块树压缩，防止长视频吃掉静态区域的水印
+            "-x264opts", "no-mbtree",
+
+            # 👇 新增参数 3：强制使用全色阶，防止像素值被线性缩放破坏
+            "-color_range", "pc",
+
+            "-pix_fmt", "yuv420p",
+            "-c:a", "aac",
+            "-b:a", "192k",
+            "-fps_mode", "cfr",
+            output_video_path
+        ]
+
+        # ---------------- 核心修改二：防死锁启动进程 ----------------
+        # 注意 stderr=subprocess.DEVNULL，直接丢弃 FFmpeg 的冗长日志，防止管道写满导致死锁停滞
+        process = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=subprocess.DEVNULL)
 
         embedded_count = 0
         current_frame_idx = 0
-        # 限制并发进程数，避免内存爆炸（每个进程都要加载水印处理器）
         cpu_cores = min(multiprocessing.cpu_count(), 4)
         chunk_size = 30
         config_dict = self.config.__dict__
 
-        logger.info(f"目标嵌入区间: {start_time}s - {end_time}s (帧 {start_frame} 到 {end_frame}), 总帧数 {total_frames}")
-
-        with ProcessPoolExecutor(max_workers=cpu_cores) as executor:
-            while cap.isOpened():
-                buffer_info = []
-                for _ in range(chunk_size * cpu_cores):
-                    ret, frame = cap.read()
-                    if not ret:
-                        break
-                    needs_embed = (start_frame <= current_frame_idx <= end_frame)
-                    if needs_embed:
-                        embedded_count += 1
-                    buffer_info.append((frame, needs_embed))
-                    current_frame_idx += 1
-
-                if not buffer_info:
-                    break
-
-                # 每处理一批打印进度
-                pct = current_frame_idx / max(total_frames, 1) * 100
-                logger.info(f"水印嵌入进度: {current_frame_idx}/{total_frames} 帧 ({pct:.1f}%)")
-
-                chunks = [buffer_info[i:i + chunk_size]
-                          for i in range(0, len(buffer_info), chunk_size)]
-                tasks = [(chunk, scrambled_bits, config_dict) for chunk in chunks]
-                results = executor.map(_worker_embed_batch, tasks)
-
-                for chunk_result in results:
-                    for w_frame in chunk_result:
-                        out.write(w_frame)
-
-        cap.release()
-        out.release()
-        logger.info(f"帧嵌入完成，共 {embedded_count} 帧。开始 FFmpeg 编码...")
-
-        # 用 FFmpeg 将无损 AVI 转为高质量 H.264 MP4 (CRF 18 近无损)
-        # CRF 值越低质量越高：0=无损, 16=视觉无损, 23=默认, 51=最差
-        ffmpeg_cmd = shutil.which("ffmpeg")
-        if ffmpeg_cmd:
-            try:
-                # 如果原视频有音轨，从原视频复制音频流
-                cmd = [
-                    ffmpeg_cmd, "-y",
-                    "-i", lossless_tmp,
-                    "-i", input_video_path,
-                    "-map", "0:v:0",       # 视频流来自水印后的无损文件
-                    "-map", "1:a?",        # 音频流来自原视频（如果有的话）
-                    "-c:v", "libx264",
-                    "-crf", "18",
-                    "-preset", "medium",
-                    "-pix_fmt", "yuv420p",
-                    "-c:a", "aac",
-                    "-b:a", "192k",
-                    output_video_path,
-                ]
-                subprocess.run(cmd, capture_output=True, timeout=3600, check=True)
-                logger.info("FFmpeg 高质量编码完成: CRF=18, 已保留原音轨")
-            except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
-                logger.warning(f"FFmpeg 转码失败，回退到无损 AVI: {e}")
-                shutil.copy2(lossless_tmp, output_video_path)
-        else:
-            # 没有 FFmpeg，直接用无损 AVI（文件会很大但水印完整）
-            logger.warning("未找到 FFmpeg，输出无损 AVI 格式")
-            shutil.copy2(lossless_tmp, output_video_path)
-
-        # 清理无损中间文件
         try:
-            os.unlink(lossless_tmp)
-        except OSError:
-            pass
+            with ProcessPoolExecutor(max_workers=cpu_cores) as executor:
+                while cap.isOpened():
+                    buffer_info = []
+                    for _ in range(chunk_size * cpu_cores):
+                        ret, frame = cap.read()
+                        if not ret:
+                            break
+                        needs_embed = (start_frame <= current_frame_idx <= end_frame)
+                        if needs_embed:
+                            embedded_count += 1
+                        buffer_info.append((frame, needs_embed))
+                        current_frame_idx += 1
 
-        logger.info(f"视频处理完成！共嵌入 {embedded_count} 帧。耗时: {time.time() - start_process_time:.2f} 秒.")
+                    if not buffer_info:
+                        break
+
+                    # 每处理一批打印进度
+                    pct = current_frame_idx / max(total_frames, 1) * 100
+                    logger.info(f"处理与管道写入进度: {current_frame_idx}/{total_frames} 帧 ({pct:.1f}%)")
+
+                    chunks = [buffer_info[i:i + chunk_size] for i in range(0, len(buffer_info), chunk_size)]
+                    tasks = [(chunk, scrambled_bits, config_dict) for chunk in chunks]
+                    results = executor.map(_worker_embed_batch, tasks)
+
+                    for chunk_result in results:
+                        for w_frame in chunk_result:
+                            # ---------------- 核心修改三：将画面写入管道 ----------------
+                            try:
+                                process.stdin.write(w_frame.tobytes())
+                            except BrokenPipeError:
+                                logger.error("FFmpeg 管道意外断开！可能是参数不支持或提前退出。")
+                                raise
+
+        except Exception as e:
+            logger.error(f"处理过程中发生异常: {e}")
+            if process.stdin:
+                process.stdin.close()
+            process.terminate()
+            raise
+        finally:
+            cap.release()
+
+        # ---------------- 核心修改四：安全结束收尾 ----------------
+        if process.stdin:
+            process.stdin.close()  # 发送 EOF (End Of File) 信号给 FFmpeg，让它开始封装文件尾部
+
+        logger.info("所有帧已送入管道，等待 FFmpeg 封装收尾 (防死锁版)...")
+        process.wait()  # 此时由于我们没有捕获 stderr，这里会迅速完成，不会死锁
+
+        if process.returncode != 0:
+            logger.error(f"FFmpeg 编码失败，返回码: {process.returncode}。请检查参数是否正确。")
+        else:
+            logger.info(f"视频处理完美结束！共嵌入 {embedded_count} 帧。耗时: {time.time() - start_process_time:.2f} 秒.")
 
     def extract_from_timerange(self, video_path: str, start_time: float,
                                end_time: Optional[float] = None) -> List[Dict]:
