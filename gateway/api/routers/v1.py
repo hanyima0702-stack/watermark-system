@@ -309,8 +309,108 @@ async def create_watermark_task(
 
     file_bytes = await minio_svc.download_file(bucket_name, object_key)
 
-    # 2. 写入临时文件
+    # ============= 异步分发判断 =============
+    # 大文件（视频/音频/大文档）走 RabbitMQ 异步队列，立即返回 task_id
+    file_size = file_meta.file_size or len(file_bytes)
     suffix = Path(file_meta.original_name).suffix
+    file_type = _detect_file_type(suffix.lower())
+
+    try:
+        from business.task_scheduler import (
+            should_use_async, get_task_producer, WatermarkTaskMessage,
+            FileCategory, WatermarkAction, TaskPriority,
+        )
+        producer = get_task_producer()
+        file_cat = file_type  # image/document/video/audio
+
+        if producer and should_use_async(file_cat, file_size):
+            # 生成暗水印 bits
+            watermark_bits = None
+            wm_type = request.watermark_type
+            if wm_type in ("invisible", "both"):
+                import secrets as _secrets
+                watermark_bits = format(_secrets.randbits(64), '064b')
+
+            # 加载配置
+            saved_visible_cfg = None
+            visible_text = request.visible_text or ""
+            if request.config_id and request.config_id != "default":
+                try:
+                    config_dao = _auth_service.db_manager.get_dao('watermark_config')
+                    db_cfg = await config_dao.get_by_id(request.config_id)
+                    if db_cfg and db_cfg.created_by == user_id:
+                        saved_visible_cfg = db_cfg.visible_config or {}
+                        if not visible_text and saved_visible_cfg.get("text"):
+                            visible_text = saved_visible_cfg["text"]
+                except Exception:
+                    pass
+
+            # 构建标准化任务消息
+            task_msg = WatermarkTaskMessage(
+                task_id=task_id,
+                user_id=user_id,
+                file_id=request.file_id,
+                file_category=file_cat,
+                original_filename=file_meta.original_name,
+                file_size=file_size,
+                minio_bucket=bucket_name,
+                minio_object_key=object_key,
+                action=WatermarkAction.EMBED.value,
+                watermark_type=wm_type.value if hasattr(wm_type, 'value') else str(wm_type),
+                watermark_bits=watermark_bits,
+                invisible_note=request.invisible_text,
+                visible_text=visible_text,
+                visible_config=request.visible_config.dict() if request.visible_config else None,
+                config_id=request.config_id,
+                saved_visible_cfg=saved_visible_cfg,
+                output_bucket=minio_svc.config.result_bucket,
+                output_object_key=f"results/{user_id}/{task_id}{suffix}",
+                priority=request.priority or TaskPriority.NORMAL.value,
+                callback_url=request.callback_url,
+            )
+
+            # 投递到 RabbitMQ
+            await producer.submit_task(task_msg)
+
+            # 在数据库创建 pending 任务记录
+            try:
+                task_dao = _auth_service.db_manager.get_dao('watermark_task')
+                from storage.models.watermark_task import WatermarkTask as WTModel
+                task_record = WTModel(
+                    task_id=task_id,
+                    user_id=user_id,
+                    file_id=request.file_id,
+                    config_id=request.config_id if request.config_id != "default" else None,
+                    task_type=wm_type.value if hasattr(wm_type, 'value') else str(wm_type),
+                    status="pending",
+                    progress=0.0,
+                    processing_engine=file_type,
+                    quality_metrics={
+                        "watermark_bits": watermark_bits,
+                        "visible_text": visible_text or None,
+                        "invisible_note": request.invisible_text or None,
+                        "async": True,
+                    },
+                )
+                await task_dao.create(task_record)
+            except Exception as e:
+                import structlog
+                structlog.get_logger().warning(f"Failed to save async task record: {e}")
+
+            # 立即返回，前端通过轮询 /watermark/tasks/{task_id} 获取进度
+            return WatermarkTaskResponse(
+                task_id=task_id,
+                status="pending",
+                created_at=datetime.utcnow(),
+                message="任务已提交到异步处理队列，请通过任务ID查询进度",
+                watermark_bits=watermark_bits,
+            )
+    except ImportError:
+        pass  # RabbitMQ 模块未安装时回退到同步处理
+
+    # ============= 同步处理（小文件走原有逻辑） =============
+
+    # 2. 写入临时文件
     with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
         tmp.write(file_bytes)
         tmp_path = tmp.name
@@ -319,7 +419,6 @@ async def create_watermark_task(
     watermark_bits = None  # 实际嵌入的64位bit串
     try:
         import secrets
-        file_type = _detect_file_type(suffix.lower())
         wm_type = request.watermark_type
         invisible_note = request.invisible_text or ""  # 用户备注
         visible_text = request.visible_text or ""
@@ -409,6 +508,49 @@ async def create_watermark_task(
         elif file_type == "document":
             from engines.document.pdf_processor import PDFProcessor
             from engines.document.base_processor import WatermarkConfig as DocWMConfig
+            import subprocess
+
+            # 非 PDF 文件先转成 PDF
+            working_path = Path(tmp_path)
+            converted_pdf = None
+            if suffix.lower() != ".pdf":
+                try:
+                    # 查找 soffice 可执行文件
+                    import shutil
+                    soffice_cmd = shutil.which("soffice")
+                    if not soffice_cmd:
+                        # Windows 常见安装路径
+                        for p in [
+                            r"C:\Program Files\LibreOffice\program\soffice.exe",
+                            r"C:\Program Files (x86)\LibreOffice\program\soffice.exe",
+                        ]:
+                            if os.path.exists(p):
+                                soffice_cmd = p
+                                break
+                    if not soffice_cmd:
+                        raise FileNotFoundError("soffice not found")
+
+                    tmp_dir = working_path.parent
+                    conv_result = subprocess.run(
+                        [soffice_cmd, "--headless", "--convert-to", "pdf", "--outdir", str(tmp_dir), str(working_path)],
+                        capture_output=True, text=True, timeout=120,
+                    )
+                    if conv_result.returncode != 0:
+                        raise RuntimeError(f"LibreOffice exit code {conv_result.returncode}: {conv_result.stderr}")
+                    converted_pdf = tmp_dir / (working_path.stem + ".pdf")
+                    if not converted_pdf.exists():
+                        raise RuntimeError(f"转换输出文件不存在: {converted_pdf}")
+                    working_path = converted_pdf
+                except FileNotFoundError:
+                    raise HTTPException(
+                        status_code=400,
+                        detail="未找到 soffice 命令。请确认 LibreOffice 已安装且 soffice 在 PATH 中。"
+                    )
+                except subprocess.TimeoutExpired:
+                    raise HTTPException(status_code=500, detail="文档转换超时")
+                except RuntimeError as e:
+                    raise HTTPException(status_code=500, detail=f"文档转 PDF 失败: {e}")
+
             processor = PDFProcessor()
             vis_cfg = None
             if visible_text and wm_type in ("visible", "both"):
@@ -421,15 +563,22 @@ async def create_watermark_task(
                     }
                 })
             result_obj = await processor.process_watermark(
-                file_path=Path(tmp_path),
+                file_path=working_path,
                 minio_service=minio_svc,
                 invisible_watermark=watermark_bits,
                 visible_watermark_config=vis_cfg,
                 user_id=user_id,
-                object_key=f"results/{user_id}/{task_id}{suffix}",
+                object_key=f"results/{user_id}/{task_id}.pdf",
                 bucket_name=minio_svc.config.result_bucket,
             )
             minio_object_key = result_obj.minio_object_key
+
+            # 清理转换的临时 PDF
+            if converted_pdf and converted_pdf.exists():
+                try:
+                    os.unlink(converted_pdf)
+                except OSError:
+                    pass
 
         elif file_type == "audio":
             from engines.media.audio_invisible_watermark import AudioInvisibleWatermarker
@@ -444,7 +593,7 @@ async def create_watermark_task(
             minio_object_key = result_obj.get("minio_object_key")
 
         elif file_type == "video":
-            from engines.media.video_invisible_watermark import VideoWatermarkProcessor
+            from engines.media.video_invisible_watermark import VideoWatermarker
             import tempfile as _tmpmod
 
             current_video = tmp_path
@@ -452,10 +601,16 @@ async def create_watermark_task(
 
             # 视频暗水印
             if watermark_bits:
-                processor = VideoWatermarkProcessor()
-                tmp_invisible = processor.invisible_watermarker.embed_file(current_video, watermark_bits)
-                tmp_video_files.append(tmp_invisible)
-                current_video = tmp_invisible
+                tmp_out = _tmpmod.NamedTemporaryFile(suffix=suffix, delete=False).name
+                tmp_video_files.append(tmp_out)
+                vw = VideoWatermarker()
+                vw.embed_video_timerange(
+                    input_video_path=current_video,
+                    output_video_path=tmp_out,
+                    watermark_text=watermark_bits,
+                    start_time=0,
+                )
+                current_video = tmp_out
 
             # 视频明水印（FFmpeg drawtext）
             if visible_text and wm_type in ("visible", "both"):
@@ -542,7 +697,7 @@ async def create_watermark_task(
             user_id=user_id,
             file_id=request.file_id,
             config_id=request.config_id if request.config_id != "default" else None,
-            task_type=str(wm_type),
+            task_type=wm_type.value if hasattr(wm_type, 'value') else str(wm_type),
             status="completed",
             progress=100.0,
             processing_engine=file_type,
@@ -640,14 +795,73 @@ async def get_task_status(
     current_user = Depends(get_current_user),
     service_client = Depends(get_service_client)
 ):
-    """获取任务状态和进度（仅限当前用户的任务）"""
+    """
+    获取任务状态和进度（仅限当前用户的任务）
+    优先从 Redis 读取实时进度，回退到数据库
+    """
+    import json
     user_id = current_user["user_id"]
-    
-    # TODO: 调用业务服务查询任务状态，验证任务属于当前用户
+
+    # 1. 尝试从 Redis 获取实时状态 (Worker 异步更新)
+    redis_data = None
+    try:
+        import redis.asyncio as aioredis
+        import os
+        redis_url = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+        r = aioredis.from_url(redis_url, decode_responses=True)
+        raw = await r.get(f"task:{task_id}:status")
+        await r.close()
+        if raw:
+            redis_data = json.loads(raw)
+    except Exception as redis_err:
+        import structlog
+        structlog.get_logger().warning(f"Redis 查询任务状态失败: {redis_err}")
+
+    if redis_data:
+        return TaskStatusResponse(
+            task_id=task_id,
+            status=redis_data.get("status", "pending"),
+            progress=redis_data.get("progress", 0.0) / 100.0,
+            created_at=datetime.utcnow(),
+            updated_at=datetime.utcnow(),
+            error_message=redis_data.get("error_message"),
+            result_file_id=redis_data.get("result", {}).get("minio_object_key") if isinstance(redis_data.get("result"), dict) else None,
+        )
+
+    # 2. 回退到数据库查询
+    from gateway.api.routers.auth import _auth_service
+    if _auth_service:
+        try:
+            task_dao = _auth_service.db_manager.get_dao('watermark_task')
+            async with _auth_service.db_manager.get_session() as session:
+                from sqlalchemy import select
+                from storage.models.watermark_task import WatermarkTask
+                result = await session.execute(
+                    select(WatermarkTask).where(
+                        WatermarkTask.task_id == task_id,
+                        WatermarkTask.user_id == user_id,
+                    )
+                )
+                task = result.scalar_one_or_none()
+                if task:
+                    qm = task.quality_metrics or {}
+                    return TaskStatusResponse(
+                        task_id=task_id,
+                        status=task.status,
+                        progress=float(task.progress or 0) / 100.0,
+                        created_at=task.created_at or datetime.utcnow(),
+                        updated_at=task.created_at or datetime.utcnow(),
+                        completed_at=task.completed_at,
+                        error_message=task.error_message,
+                        result_file_id=qm.get("minio_object_key"),
+                    )
+        except Exception:
+            pass
+
     return TaskStatusResponse(
         task_id=task_id,
-        status="processing",
-        progress=0.5,
+        status="pending",
+        progress=0.0,
         created_at=datetime.utcnow(),
         updated_at=datetime.utcnow()
     )
@@ -794,6 +1008,74 @@ async def extract_watermark(
                     "page": result_dict.get("page", 0),
                 }
                 confidence = min(result_dict["confidence"] / 100.0, 1.0)
+            else:
+                extracted_data = {"error": "未检测到水印"}
+
+        elif file_type == "video":
+            # 逐帧扫描视频，同一水印出现 2 次即提前返回
+            import cv2 as _cv2
+            import tempfile as _tf2
+            from engines.media.video_invisible_watermark import VideoWatermarker
+
+            vw = VideoWatermarker()
+            cap = _cv2.VideoCapture(tmp_path)
+            fps = cap.get(_cv2.CAP_PROP_FPS) or 25
+            total_frames = int(cap.get(_cv2.CAP_PROP_FRAME_COUNT))
+
+            # 每隔 1 秒采样一帧，最多扫描 30 帧
+            step = max(1, int(fps))
+            max_scan = 30
+            scanned = 0
+            wm_counts: dict = {}  # watermark_data -> (count, best_confidence)
+            best = None
+
+            with _tf2.NamedTemporaryFile(suffix='.png', delete=False) as ftmp:
+                frame_img_path = ftmp.name
+
+            try:
+                for frame_pos in range(0, total_frames, step):
+                    if scanned >= max_scan:
+                        break
+                    cap.set(_cv2.CAP_PROP_POS_FRAMES, frame_pos)
+                    ret, frame = cap.read()
+                    if not ret:
+                        continue
+
+                    _cv2.imwrite(frame_img_path, frame)
+                    result = vw.processor.extract_watermark(frame_img_path)
+                    scanned += 1
+
+                    if result.success:
+                        wm = result.watermark_data
+                        prev_count, prev_conf = wm_counts.get(wm, (0, 0))
+                        new_conf = max(prev_conf, result.confidence)
+                        wm_counts[wm] = (prev_count + 1, new_conf)
+
+                        # 同一水印出现 2 次，提前结束
+                        if prev_count + 1 >= 2:
+                            best = {"data": wm, "confidence": new_conf, "count": prev_count + 1}
+                            break
+            finally:
+                cap.release()
+                try:
+                    os.unlink(frame_img_path)
+                except OSError:
+                    pass
+
+            # 如果没有重复 2 次的，取出现次数最多的
+            if not best and wm_counts:
+                top_wm = max(wm_counts, key=lambda k: (wm_counts[k][0], wm_counts[k][1]))
+                cnt, conf = wm_counts[top_wm]
+                best = {"data": top_wm, "confidence": conf, "count": cnt}
+
+            if best:
+                extracted_data = {
+                    "watermark_data": best["data"],
+                    "confidence": best["confidence"],
+                    "frames_scanned": scanned,
+                    "match_count": best["count"],
+                }
+                confidence = min(best["confidence"] / 100.0, 1.0)
             else:
                 extracted_data = {"error": "未检测到水印"}
 
@@ -1021,6 +1303,9 @@ async def list_configs(
     config_dao = _auth_service.db_manager.get_dao('watermark_config')
     configs = await config_dao.get_user_configs(current_user["user_id"])
 
+    # 只返回未逻辑删除的配置
+    configs = [c for c in configs if c.is_active]
+
     if media_type:
         configs = [c for c in configs if (c.template_variables or {}).get('media_type') == media_type]
 
@@ -1042,7 +1327,7 @@ async def delete_config(
     current_user = Depends(get_current_user),
     service_client = Depends(get_service_client)
 ):
-    """删除配置"""
+    """逻辑删除配置（设为不可用）"""
     from gateway.api.routers.auth import _auth_service
     if not _auth_service:
         raise HTTPException(status_code=503, detail="服务未初始化")
@@ -1052,7 +1337,7 @@ async def delete_config(
     if not cfg or cfg.created_by != current_user["user_id"]:
         raise HTTPException(status_code=404, detail="Config not found")
 
-    await config_dao.delete(config_id)
+    await config_dao.update(config_id, {"is_active": False})
     return {"message": "Config deleted successfully"}
 
 

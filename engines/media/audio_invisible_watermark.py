@@ -508,32 +508,34 @@ class AudioInvisibleWatermarker:
     ) -> dict:
         """
         上层方法：嵌入暗水印后上传 MinIO。
-        （音频暂无明水印，预留扩展）
-
-        Args:
-            input_path:          原始音频路径
-            minio_service:       MinIOService 实例
-            invisible_watermark: 暗水印比特字符串，None 则直接上传原文件
-            object_key:          MinIO 对象键，不传则自动生成
-            bucket_name:         目标 bucket，不传则使用 result_bucket
-
-        Returns:
-            dict，包含 success、minio_object_key 等字段
+        （已改造为线程池安全版本）
         """
         import time, uuid
+        import asyncio  # 引入 asyncio
+
         start_time = time.time()
         try:
             ext = Path(input_path).suffix.lower().lstrip('.') or 'wav'
 
             if invisible_watermark:
-                audio_bytes = self.embed_file(input_path, invisible_watermark)
+                # 【关键修改】：将重度的音频解码、numpy运算、pydub导出全部推入线程池
+                audio_bytes = await asyncio.to_thread(
+                    self.embed_file,
+                    input_path,
+                    invisible_watermark
+                )
             else:
-                with open(input_path, 'rb') as f:
-                    audio_bytes = f.read()
+                # 即使是普通的文件读取，也建议用异步或扔进线程池，防止大文件阻塞
+                def _read_file(path):
+                    with open(path, 'rb') as f:
+                        return f.read()
+
+                audio_bytes = await asyncio.to_thread(_read_file, input_path)
 
             target_bucket = bucket_name or minio_service.config.result_bucket
             target_key = object_key or f"watermarked/{uuid.uuid4().hex}.{ext}"
 
+            # MinIO 上传本身就是异步的，保持原样即可
             await minio_service.upload_file(
                 bucket_name=target_bucket,
                 object_key=target_key,

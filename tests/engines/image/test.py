@@ -6,6 +6,8 @@ from engines.media.video_invisible_watermark import VideoWatermarkProcessor
 from engines.media.audio_invisible_watermark import AudioInvisibleWatermarker
 from pydub import AudioSegment
 import os
+from moviepy.video.io.VideoFileClip import VideoFileClip
+import os
 
 class Test:
 
@@ -111,6 +113,28 @@ class Test:
         input = "D:/video/watermarked.mp4"
         watermarker = VideoWatermarker()
         watermarker.extract_from_timerange(input,0,1)
+
+
+    def test_cut_video(self):
+        input_path= "D:/video/video1.mp4"
+        start_time = 0
+        end_time=10
+        output_path= "D:/video/video11.mp4"
+        # 加载视频
+        video = VideoFileClip(input_path)
+
+        # 截取视频片段
+        sub_video = video.subclipped(start_time, end_time)
+
+        # 保存视频
+        sub_video.write_videofile(output_path, codec='libx264', audio_codec='aac')
+
+        # 关闭视频文件
+        video.close()
+        sub_video.close()
+
+        print(f"视频截取成功！保存至: {output_path}")
+        return True
 
 
 

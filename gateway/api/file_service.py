@@ -422,13 +422,14 @@ class FileService:
         try:
             # 上传到MinIO
             content_type = file.content_type or mimetypes.guess_type(file.filename)[0]
+            from urllib.parse import quote
             minio_result = await self.minio_service.upload_file(
                 bucket_name=bucket_name,
                 object_key=object_key,
                 file_data=content,
                 content_type=content_type,
                 metadata={
-                    'original_filename': file.filename,
+                    'original_filename': quote(file.filename, safe=''),
                     'user_id': user_id,
                     'file_hash': file_hash
                 }

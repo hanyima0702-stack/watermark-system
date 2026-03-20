@@ -83,7 +83,24 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.error(f"Failed to initialize auth service: {str(e)}", exc_info=True)
     
+    # Initialize RabbitMQ task producer for async processing
+    try:
+        import os
+        from business.task_scheduler.task_producer import init_task_producer
+        rabbitmq_url = os.getenv("RABBITMQ_URL", "amqp://guest:guest@localhost:5672/")
+        await init_task_producer(rabbitmq_url)
+        logger.info("RabbitMQ TaskProducer initialized successfully")
+    except Exception as e:
+        logger.warning(f"RabbitMQ TaskProducer init failed (async tasks unavailable): {e}")
+    
     yield
+    
+    # Shutdown RabbitMQ producer
+    try:
+        from business.task_scheduler.task_producer import shutdown_task_producer
+        await shutdown_task_producer()
+    except Exception:
+        pass
     
     logger.info("Shutting down API Gateway")
 

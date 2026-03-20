@@ -113,6 +113,7 @@ services:
       - REDIS_PORT=6379
       - REDIS_PASSWORD=${REDIS_PASSWORD:-xmy123456}
       - MINIO_ENDPOINT=minio:9000
+      - RABBITMQ_URL=amqp://${RABBITMQ_USER:-watermark}:${RABBITMQ_PASS:-watermark123}@rabbitmq:5672/
     depends_on:
       mysql:
         condition: service_healthy
@@ -147,10 +148,100 @@ services:
     networks:
       - watermark-network
 
+  # RabbitMQ 消息队列
+  rabbitmq:
+    image: rabbitmq:3-management
+    container_name: watermark-rabbitmq
+    restart: always
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:-watermark}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASS:-watermark123}
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    networks:
+      - watermark-network
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  # 水印处理 Worker — 视频/音频队列 (重度计算，prefetch=1)
+  worker-media:
+    build:
+      context: .
+      dockerfile: Dockerfile.prod
+    container_name: watermark-worker-media
+    restart: always
+    command: ["python", "-m", "business.task_scheduler.worker_main", "--queues", "watermark.video", "watermark.audio"]
+    env_file:
+      - .env.prod
+    environment:
+      - RABBITMQ_URL=amqp://${RABBITMQ_USER:-watermark}:${RABBITMQ_PASS:-watermark123}@rabbitmq:5672/
+      - REDIS_URL=redis://:${REDIS_PASSWORD:-xmy123456}@redis:6379/0
+      - DATABASE_HOST=mysql
+      - DATABASE_PORT=3306
+      - MINIO_ENDPOINT=minio:9000
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    volumes:
+      - upload_data:/data/uploads
+      - output_data:/data/outputs
+    networks:
+      - watermark-network
+    deploy:
+      resources:
+        limits:
+          cpus: '4'
+          memory: 4G
+
+  # 水印处理 Worker — 文档/图片队列
+  worker-doc:
+    build:
+      context: .
+      dockerfile: Dockerfile.prod
+    container_name: watermark-worker-doc
+    restart: always
+    command: ["python", "-m", "business.task_scheduler.worker_main", "--queues", "watermark.document", "watermark.image", "watermark.default"]
+    env_file:
+      - .env.prod
+    environment:
+      - RABBITMQ_URL=amqp://${RABBITMQ_USER:-watermark}:${RABBITMQ_PASS:-watermark123}@rabbitmq:5672/
+      - REDIS_URL=redis://:${REDIS_PASSWORD:-xmy123456}@redis:6379/0
+      - DATABASE_HOST=mysql
+      - DATABASE_PORT=3306
+      - MINIO_ENDPOINT=minio:9000
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    volumes:
+      - upload_data:/data/uploads
+      - output_data:/data/outputs
+    networks:
+      - watermark-network
+
 volumes:
   mysql_data:
   redis_data:
   minio_data:
+  rabbitmq_data:
   upload_data:
   output_data:
 

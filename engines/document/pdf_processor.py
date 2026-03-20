@@ -106,7 +106,7 @@ class PDFProcessor(DocumentProcessor):
         for page_num in range(len(pdf_doc)):
             page = pdf_doc[page_num]
 
-            mat = fitz.Matrix(300 / 72, 300 / 72)
+            mat = fitz.Matrix(150 / 72, 150 / 72)
             pix = page.get_pixmap(matrix=mat, alpha=False)
 
             img_data = np.frombuffer(pix.samples, dtype=np.uint8)
@@ -122,7 +122,7 @@ class PDFProcessor(DocumentProcessor):
             uint8_img = cv2.cvtColor(uint8_img, cv2.COLOR_BGR2RGB)
 
             img_buffer = io.BytesIO()
-            Image.fromarray(uint8_img).save(img_buffer, format="PNG")
+            Image.fromarray(uint8_img).save(img_buffer, format="JPEG", quality=85)
             img_buffer.seek(0)
 
             new_page.insert_image(new_page.rect, stream=img_buffer.getvalue())
@@ -130,7 +130,7 @@ class PDFProcessor(DocumentProcessor):
 
         page_count = len(pdf_doc)
         pdf_buffer = io.BytesIO()
-        output_doc.save(pdf_buffer)
+        output_doc.save(pdf_buffer, deflate=True, garbage=4)
         output_doc.close()
         pdf_doc.close()
 

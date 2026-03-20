@@ -48,7 +48,7 @@ class Settings(BaseSettings):
     UPLOAD_TIMEOUT: int = 600  # 10分钟
     
     # 文件上传配置
-    MAX_UPLOAD_SIZE: int = 100 * 1024 * 1024  # 100MB
+    MAX_UPLOAD_SIZE: int = 2 * 1024 * 1024 * 1024  # 2GB
     ALLOWED_EXTENSIONS: List[str] = [
         ".docx", ".xlsx", ".pptx", ".pdf",
         ".jpg", ".jpeg", ".png", ".bmp", ".tiff",
